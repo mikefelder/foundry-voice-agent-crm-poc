@@ -4,7 +4,7 @@ A hands-free voice sales assistant for Westlake Chemical field reps, built on **
 
 A rep driving between customer sites talks to the assistant like a sales-ops colleague — pulling up accounts, reviewing opportunities, updating amounts and stages, and creating follow-up tasks — without touching a keyboard.
 
-> **Phase 1 status:** CRM data is JSON-backed mock data behind a clean provider interface. The agent, tool contracts, voice pipeline, and deployment are production-shaped from day one; only the data source is swapped in Phase 2.
+> **Status:** Wired to a live Salesforce Developer Edition org from the start — no mock CRM dataset. A `CrmProvider` seam keeps tools decoupled from the data source, with a recorded in-memory fake used only for tests and offline prompt iteration so `pytest` needs no network and voice tuning doesn't burn API quota or litter the org.
 
 ---
 
@@ -15,8 +15,14 @@ A rep driving between customer sites talks to the assistant like a sales-ops col
   - [System context](#system-context)
   - [Voice flow](#voice-flow)
   - [Tool flow and the write-safety protocol](#tool-flow-and-the-write-safety-protocol)
-  - [Tool abstraction layer](#tool-abstraction-layer)
-  - [Phase 2 Salesforce integration flow](#phase-2-salesforce-integration-flow)
+  - [Provider layer](#provider-layer)
+- [Salesforce integration](#salesforce-integration)
+  - [Authentication](#authentication)
+  - [Object mapping](#object-mapping)
+  - [Durable idempotency via External ID](#durable-idempotency-via-external-id)
+  - [Picklist resolution](#picklist-resolution)
+  - [Query injection safety](#query-injection-safety)
+  - [API limits](#api-limits)
 - [Azure reference architecture](#azure-reference-architecture)
 - [Key architectural decisions](#key-architectural-decisions)
 - [Tool surface](#tool-surface)
@@ -35,11 +41,11 @@ A rep driving between customer sites talks to the assistant like a sales-ops col
 ```
 Rep:    I just left ABC Plastics.
 Agent:  Found an open opportunity — Polyethylene Resin Expansion, five hundred
-        thousand, Negotiation. What do you want to do?
+        thousand, Value Proposition. What do you want to do?
 
 Rep:    Increase it to seven fifty and move it to Proposal.
 Agent:  Changing the amount from five hundred thousand to seven fifty thousand,
-        and the stage from Negotiation to Proposal. Save it?
+        and the stage to Proposal Price Quote. Save it?
 
 Rep:    Yes.
 Agent:  Saved.
@@ -48,6 +54,8 @@ Rep:    Create a follow-up task to send pricing next Friday.
 Agent:  Task created for Friday the twenty-eighth, assigned to you.
 ```
 
+The rep says *"Proposal"*; Salesforce's stage picklist actually reads `Proposal/Price Quote`. The agent resolves spoken shorthand against the org's real picklist values rather than writing the literal string — see [Picklist resolution](#picklist-resolution).
+
 Design rules baked into the agent instructions:
 
 | Rule | Why |
@@ -55,7 +63,9 @@ Design rules baked into the agent instructions:
 | Responses under ~15 words unless reading back a change | The rep is driving; long responses are unsafe and unusable |
 | Read back every field change before writing | Guards against misrecognition of amounts and dates |
 | Never invent a record ID | Writes only accept IDs returned by a read in the same conversation |
-| Every write carries an idempotency key | Road noise and repeated phrases must not create duplicate tasks |
+| **Absolute values only, never deltas** | "Set it to 750k" survives a replay; "raise it by 250k" compounds |
+| Every create carries an idempotency key | Road noise and repeated phrases must not create duplicate records |
+| Stage names resolved against the live picklist | Spoken shorthand rarely matches the org's actual values |
 | Deep noise suppression + semantic VAD | Car cabin audio, engine noise, passengers, radio |
 
 ---
@@ -79,12 +89,12 @@ graph TB
 
     subgraph ACA["Azure Container Apps"]
         API["CRM Tool API<br/>FastAPI"]
-        MCP["MCP Server<br/>Phase 2"]
+        MCP["MCP Server<br/>later"]
     end
 
     subgraph Data["Data"]
-        JSON["JSON fixtures<br/>Phase 1"]
-        SF["Salesforce<br/>Phase 2"]
+        SF["Salesforce<br/>Developer Edition org"]
+        FAKE["Recorded fake<br/>tests + prompt tuning"]
     end
 
     MIC <--> CLI
@@ -93,15 +103,15 @@ graph TB
     AGENT --> MODEL
     AGENT -->|"OpenAPI tool · HTTPS"| API
     MCP -.->|"other clients"| API
-    API --> JSON
-    API -.-> SF
+    API -->|"REST · JWT bearer"| SF
+    API -.->|"CRM_PROVIDER=fake"| FAKE
 
     classDef azure fill:#0078D4,stroke:#004578,color:#fff
     classDef app fill:#107C10,stroke:#0B5A0B,color:#fff
     classDef data fill:#5C2D91,stroke:#3B1D5E,color:#fff
     class VL,AGENT,MODEL azure
     class API,MCP,CLI app
-    class JSON,SF data
+    class SF,FAKE data
 ```
 
 The critical property: **the client never executes tools**. It streams audio and renders audio. All reasoning and all CRM access happen server-side, which means the browser client added later inherits the full capability set with zero additional trust.
@@ -159,27 +169,29 @@ sequenceDiagram
 
     R->>A: "I just left ABC Plastics"
     A->>T: search_accounts(query="ABC Plastics")
-    T->>D: search
-    D-->>T: [ACC-1001]
+    T->>D: SOSL FIND, escaped
+    D-->>T: 001xx… Account
     T-->>A: accounts[]
-    A->>T: get_opportunity(account_id="ACC-1001", status="open")
-    T-->>A: OPP-2001 · $500,000 · Negotiation
-    A-->>R: "Polyethylene Resin Expansion, five hundred thousand, Negotiation."
+    A->>T: get_opportunity(account_id="001xx…", open_only=true)
+    T-->>A: 006xx… · $500,000 · Value Proposition
+    A-->>R: "Polyethylene Resin Expansion, five hundred thousand,<br/>Value Proposition."
 
     R->>A: "Raise it to 750k, move to Proposal"
     rect rgba(255,193,7,0.15)
-        Note over A,T: Preview — read-only, no mutation
-        A->>T: preview_opportunity_update(OPP-2001, amount=750000, stage="Proposal")
-        T-->>A: diff{amount: 500000→750000, stage: Negotiation→Proposal}
+        Note over A,T: Preview — read-only, resolves the picklist
+        A->>T: preview_opportunity_update(006xx…, amount=750000, stage="Proposal")
+        T->>D: describe Opportunity (cached)
+        D-->>T: StageName values[]
+        T-->>A: diff{amount: 500000→750000,<br/>stage: Value Proposition→Proposal/Price Quote}
     end
-    A-->>R: "Amount five hundred thousand to seven fifty thousand,<br/>stage Negotiation to Proposal. Save it?"
+    A-->>R: "Five hundred thousand to seven fifty thousand,<br/>stage to Proposal Price Quote. Save it?"
 
     R->>A: "Yes"
     rect rgba(16,124,16,0.15)
-        Note over A,T: Commit — idempotency_key dedupes replays
-        A->>T: update_opportunity(OPP-2001, ..., idempotency_key=UUID)
-        T->>D: write
-        D-->>T: updated
+        Note over A,T: Commit — absolute values, no deltas
+        A->>T: update_opportunity(006xx…, amount=750000,<br/>stage="Proposal/Price Quote")
+        T->>D: PATCH /sobjects/Opportunity/006xx…
+        D-->>T: 204 No Content
         T-->>A: {status: "committed", record: {...}}
     end
     A-->>R: "Saved."
@@ -189,11 +201,14 @@ sequenceDiagram
 |---|---|
 | Hallucinated record | Writes reject any ID not returned by a read in this conversation |
 | Misheard amount | `preview_opportunity_update` returns a diff the agent must read back verbatim |
-| Duplicate task from repeated speech | Server-side dedupe on `idempotency_key` |
+| Replayed command compounding a value | Write tools accept absolute values only — never deltas |
+| Duplicate task from repeated speech | Upsert on a **Unique External ID** field — enforced by Salesforce, not by app memory |
+| Invalid stage name rejected by the API | Spoken stage resolved against cached `describe` picklist values |
+| Spoken input reaching the query engine | SOSL with escaped reserved characters; no raw interpolation |
 | Background speech triggering a write | Confirmation phrase required; VAD tuned with deep noise suppression |
 | Accidental destructive edit | No delete tools exist in the surface at all |
 
-### Tool abstraction layer
+### Provider layer
 
 One registry is the single source of truth. REST routes, the OpenAPI document, and the MCP tool list are all generated from it — they cannot drift.
 
@@ -205,21 +220,21 @@ graph LR
         PROV["crm/provider.py<br/>CrmProvider Protocol"]
     end
 
-    subgraph Impl["Providers"]
-        MOCK["MockCrmProvider<br/>JSON + write journal"]
-        SFDC["SalesforceProvider<br/>REST + OAuth JWT"]
+    subgraph Impl["Implementations"]
+        SFDC["SalesforceProvider<br/>REST · JWT · describe cache<br/>DEFAULT"]
+        FAKE["FakeCrmProvider<br/>recorded responses<br/>tests + prompt tuning"]
     end
 
     subgraph Surfaces["Generated surfaces"]
         REST["FastAPI routes"]
-        SPEC["openapi/salesforce-tools.json"]
+        SPEC["openapi/crm-tools.json"]
         MCPS["MCP server"]
     end
 
     REG --> HAND
     HAND --> PROV
-    PROV -.implements.-> MOCK
     PROV -.implements.-> SFDC
+    PROV -.implements.-> FAKE
     REG --> REST
     REG --> SPEC
     REG --> MCPS
@@ -227,35 +242,148 @@ graph LR
 
     classDef core fill:#107C10,stroke:#0B5A0B,color:#fff
     classDef gen fill:#0078D4,stroke:#004578,color:#fff
+    classDef prim fill:#00A1E0,stroke:#0071A8,color:#fff
     class REG,HAND,PROV core
     class REST,SPEC,MCPS gen
+    class SFDC prim
 ```
 
-Swapping to real Salesforce is a one-file change plus a config flag. The agent definition, the OpenAPI contract, the voice pipeline, and every test are untouched.
+`CRM_PROVIDER` selects the implementation. `salesforce` is the default and what every demo and integration test runs against. `fake` exists so `pytest` needs no network or credentials, and so the dozens of iterations needed to tune prompts and barge-in don't consume API quota or leave junk records behind.
 
-### Phase 2 Salesforce integration flow
+The fake is seeded from **recorded** Salesforce responses, not hand-written JSON — if the org's schema shifts, re-record rather than re-imagine.
+
+---
+
+## Salesforce integration
+
+### Authentication
+
+Two credential paths, each suited to its environment. The provider abstracts which one is in play.
 
 ```mermaid
-sequenceDiagram
-    participant A as Foundry Agent
-    participant T as CRM Tool API
-    participant KV as Key Vault
-    participant SF as Salesforce
+graph TB
+    subgraph Local["Local development"]
+        SFCLI["sf CLI<br/>sf org login web"]
+        TOK["access token<br/>+ instance URL"]
+        SFCLI --> TOK
+    end
 
-    A->>T: update_opportunity(...)<br/>Bearer: Foundry managed identity
-    T->>T: validate Entra JWT (audience + issuer)
-    T->>KV: fetch JWT signing cert (via managed identity)
-    KV-->>T: private key
-    T->>SF: POST /services/oauth2/token<br/>grant_type=jwt-bearer
-    SF-->>T: access_token (cached until expiry)
-    T->>SF: PATCH /services/data/vXX.X/sobjects/Opportunity/{id}
-    SF-->>T: 204 No Content
-    T->>SF: GET .../Opportunity/{id}
-    SF-->>T: updated record
-    T-->>A: {status: "committed", record: {...}}
+    subgraph Deployed["Container Apps"]
+        UAMI["User-assigned<br/>managed identity"]
+        KV["Key Vault<br/>RSA private key"]
+        JWT["Signed JWT<br/>RS256"]
+        UAMI -->|"get secret"| KV
+        KV --> JWT
+    end
+
+    TOK --> PROV["SalesforceProvider"]
+    JWT -->|"grant_type=jwt-bearer"| SFOAUTH["Salesforce token endpoint"]
+    SFOAUTH -->|"access_token<br/>cached to expiry"| PROV
+    PROV --> SFAPI["Salesforce REST API"]
+
+    classDef az fill:#0078D4,stroke:#004578,color:#fff
+    classDef sf fill:#00A1E0,stroke:#0071A8,color:#fff
+    class UAMI,KV az
+    class SFOAUTH,SFAPI,SFCLI sf
 ```
 
-Salesforce credentials never leave the tool API. The agent holds no Salesforce identity — it authenticates to *our* API, and our API brokers to Salesforce with a server-side JWT bearer flow.
+The JWT bearer flow, used by the deployed API:
+
+```http
+POST https://login.salesforce.com/services/oauth2/token
+grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer
+assertion=<RS256-signed JWT>
+```
+
+| JWT claim | Value |
+|---|---|
+| `iss` | Connected App consumer key |
+| `sub` | Integration user's username |
+| `aud` | `https://login.salesforce.com` (`test.salesforce.com` for sandboxes) |
+| `exp` | now + 3 minutes |
+
+The Connected App needs **Use digital signatures** with the public cert uploaded, OAuth scopes `api` and `refresh_token offline_access`, and the integration user's profile pre-authorized.
+
+Salesforce credentials never leave the tool API. The agent holds no Salesforce identity — it authenticates to *our* API, and our API brokers onward. There is no password anywhere in the flow.
+
+### Object mapping
+
+| Domain model | Salesforce object | Notable fields |
+|---|---|---|
+| Account | `Account` | `Id`, `Name`, `Industry`, `Phone`, `BillingCity`, `BillingState` |
+| Contact | `Contact` | `Id`, `AccountId`, `Name`, `Title`, `Email`, `Phone` |
+| Opportunity | `Opportunity` | `Id`, `AccountId`, `Name`, `Amount`, `StageName`, `CloseDate`, `IsClosed` |
+| Task | `Task` | `Subject`, `ActivityDate`, `WhatId`, `WhoId`, `OwnerId`, `Status`, `Priority`, `Description` |
+| Logged call | `Task` with `Type='Call'`, `Status='Completed'` | Salesforce models a completed call as a Task, not a distinct object |
+| Meeting | `Event` | `Subject`, `StartDateTime`, `WhatId` |
+
+The mapping is explicit in `crm/salesforce_mapping.py` rather than inferred. Field names like `WhatId` and `ActivityDate` carry no meaning to the model, so the domain layer speaks `account_id` and `due_date` and the mapping translates.
+
+### Durable idempotency via External ID
+
+This is the design detail that changed most when moving off mocks.
+
+Deduping an `idempotency_key` in a process-local dictionary works right up until the Container App restarts or scales to a second replica — then a replayed voice command creates a **second real Task in the customer's CRM**. In-process state is the wrong place for this guarantee.
+
+Salesforce can enforce it in the database instead. A custom field on `Task`:
+
+```xml
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Idempotency_Key__c</fullName>
+    <label>Idempotency Key</label>
+    <type>Text</type>
+    <length>64</length>
+    <externalId>true</externalId>
+    <unique>true</unique>
+</CustomField>
+```
+
+Creates then become upserts keyed on that field:
+
+```http
+PATCH /services/data/vXX.X/sobjects/Task/Idempotency_Key__c/{key}
+```
+
+| Response | Meaning | What the agent says |
+|---|---|---|
+| `201 Created` | First time this key was seen | "Task created." |
+| `204 No Content` | Replay — same record updated in place | "Already got that one." |
+
+The HTTP status distinguishes a genuine create from a replay, so the assistant can respond honestly instead of silently swallowing the duplicate.
+
+**Updates don't need this.** Setting `Amount = 750000` twice leaves the same state, so `Opportunity` needs no External ID field. That property only holds because write tools accept **absolute values and never deltas** — the reason that rule is enforced in the tool contract rather than left to the prompt.
+
+### Picklist resolution
+
+`Opportunity.StageName` is a picklist whose values are org-specific. A stock org ships:
+
+```
+Prospecting · Qualification · Needs Analysis · Value Proposition
+Id. Decision Makers · Perception Analysis · Proposal/Price Quote
+Negotiation/Review · Closed Won · Closed Lost
+```
+
+A rep says *"move it to Proposal."* Writing the literal string `Proposal` fails — the value is `Proposal/Price Quote`. So the provider calls `describe` on `Opportunity`, caches the picklist, and resolves spoken shorthand against it. An unresolvable or ambiguous stage is an error the agent surfaces as a spoken question, never a guess.
+
+This generalises: any picklist the tools write to gets resolved the same way, which is what keeps the assistant portable to a real Westlake org with customised stages.
+
+### Query injection safety
+
+`search_accounts` builds a query from **spoken user input**, and the Salesforce REST API has **no bind parameters** for SOQL — the query is a string you assemble. That is a live injection surface.
+
+Mitigation, in order of preference:
+
+1. **SOSL for name search** — `FIND {term} IN NAME FIELDS RETURNING Account(Id, Name, Industry)`, with SOSL reserved characters escaped: `? & | ! { } [ ] ( ) ^ ~ * : \ " ' + -`
+2. **Escaped SOQL literals** where SOSL doesn't fit — backslash and single-quote escaped, length-capped, character-class validated
+3. **Never** string-interpolate a raw transcript into a query
+
+Escaping lives in one place, `crm/soql.py`, with tests covering the reserved-character set. It is not open-coded per call site.
+
+### API limits
+
+Developer Edition allows **15,000 API calls per rolling 24 hours**. A single voice turn can spend several — search, describe, read, preview, write.
+
+That budget is fine for demos and integration runs, and completely inadequate for the iteration loop of tuning agent instructions. Hence `CRM_PROVIDER=fake` for prompt work and the full test suite, `salesforce` for anything that needs to be real.
 
 ---
 
@@ -278,19 +406,19 @@ graph TB
 
         subgraph COMPUTE["Container Apps environment"]
             CAPP["ca-crm-tools<br/>FastAPI · external ingress · HTTPS"]
-            CMCP["ca-mcp-server<br/>Phase 2"]
+            CMCP["ca-mcp-server<br/>later"]
         end
 
         subgraph SUPPORT["Platform services"]
             ACR["Azure Container Registry"]
             UAMI["User-assigned managed identity"]
-            KVLT["Key Vault<br/>Salesforce credentials · Phase 2"]
+            KVLT["Key Vault<br/>Salesforce JWT private key"]
             LAW["Log Analytics workspace"]
             APPI["Application Insights"]
         end
     end
 
-    SFDC["Salesforce<br/>Phase 2"]
+    SFDC["Salesforce<br/>Developer Edition org"]
 
     DEV -->|"WSS 443<br/>Entra token"| FRES
     FRES --> PROJ
@@ -301,7 +429,7 @@ graph TB
     CAPP --> UAMI
     UAMI -->|"AcrPull"| ACR
     UAMI -->|"get secret"| KVLT
-    CAPP -.->|"Phase 2"| SFDC
+    CAPP -->|"REST · JWT bearer"| SFDC
     CAPP --> APPI
     CMCP --> APPI
     APPI --> LAW
@@ -324,12 +452,13 @@ graph TB
 | Microsoft Foundry AI Services + project | Hosts Voice Live and the agent | **Existing** — referenced as a parameter |
 | Model deployment (`gpt-realtime`) | Agent reasoning + native audio | Existing |
 | Prompt Agent | Instructions, Voice Live session config, OpenAPI tool binding | `agent/provision.py` |
+| Salesforce Developer Edition org | System of record | **Existing** — Connected App added during setup |
 | Container Apps environment | Runtime for tool API and MCP server | Bicep |
-| Container App — CRM Tool API | Executes CRM tools; called by Foundry | Bicep + `azd deploy` |
+| Container App — CRM Tool API | Executes CRM tools; called by Foundry, calls Salesforce | Bicep + `azd deploy` |
 | Azure Container Registry | Container images | Bicep |
-| User-assigned managed identity | ACR pull, Key Vault access, Salesforce broker identity | Bicep |
-| Key Vault | Salesforce JWT signing cert (Phase 2) | Bicep |
-| Log Analytics + Application Insights | Traces, tool latency, conversation telemetry | Bicep |
+| User-assigned managed identity | ACR pull, Key Vault access | Bicep |
+| Key Vault | Salesforce JWT signing key | Bicep |
+| Log Analytics + Application Insights | Traces, tool latency, Salesforce API call counts | Bicep |
 
 ### Identity and authentication
 
@@ -337,7 +466,7 @@ graph TB
 graph LR
     DEV["Rep device"] -->|"AzureCliCredential<br/>role: Foundry User"| VL["Voice Live"]
     VL -->|"internal"| AGT["Agent"]
-    AGT -->|"Phase 1: API key via connection<br/>Phase 2: managed identity JWT"| API["CRM Tool API"]
+    AGT -->|"API key via connection<br/>→ managed identity JWT"| API["CRM Tool API"]
     API -->|"UAMI"| KV["Key Vault"]
     API -->|"OAuth JWT bearer"| SF["Salesforce"]
 
@@ -348,8 +477,9 @@ graph LR
 Non-negotiables:
 
 - **Voice Live agent mode is Entra-only.** API keys are rejected outright for agent invocation. Local dev uses `AzureCliCredential`; deployed clients use managed identity.
-- **The tool API is never anonymous.** It exposes write endpoints on a public ingress. Phase 1 authenticates via an API key stored in a Foundry custom-keys connection; Phase 2 moves to managed identity with Entra JWT validation at the API.
-- **No secrets in source or in agent metadata.** Agent metadata holds Voice Live session config only.
+- **The tool API is never anonymous.** It exposes write endpoints on a public ingress that mutate a real CRM. It authenticates via an API key stored in a Foundry custom-keys connection, moving to managed identity with Entra JWT validation.
+- **No secrets in source, in agent metadata, or in the container image.** The Salesforce private key lives in Key Vault and is fetched at runtime via managed identity. Agent metadata holds Voice Live session config only.
+- **The `.key` and `.pem` files generated during setup are gitignored.** They are the credential.
 
 ---
 
@@ -377,7 +507,19 @@ So: **the voice path uses OpenAPI tools.** The MCP server ships as a Phase 2 del
 
 ### Preview-then-commit instead of client-side confirmation
 
-Confirmation logic lives in the tool contract, not just the prompt. `preview_opportunity_update` is a real read-only endpoint returning a structured diff. The agent is instructed to call it before any mutation, and the write endpoint independently requires an idempotency key. Prompt-only confirmation is one jailbreak away from a bad write; this is defense in depth.
+Confirmation logic lives in the tool contract, not just the prompt. `preview_opportunity_update` is a real read-only endpoint returning a structured diff with the picklist already resolved. The agent is instructed to call it before any mutation. Prompt-only confirmation is one jailbreak away from a bad write; this is defense in depth.
+
+### Idempotency in the database, not the process
+
+The obvious implementation — a dictionary of seen idempotency keys — silently fails on restart or a second replica, and the failure mode is duplicate records in a customer's CRM. Pushing the constraint into a **Unique External ID** field makes Salesforce itself the arbiter, and the `201` vs `204` response tells the agent which happened.
+
+This only works because writes are restricted to absolute values. A delta-based API (`increase_amount_by`) cannot be made idempotent this way, which is why that shape was excluded from the tool surface.
+
+### Live org from day one, recorded fake for iteration
+
+Building against mock data first tends to produce tools shaped around imagined records — and every real-schema surprise arrives late. Going live-first surfaced picklist resolution, External ID upserts, and SOQL escaping as *design* concerns rather than integration bugs.
+
+The fake still exists, but it is a recorded test double, not a parallel data model: `pytest` runs offline, prompt iteration doesn't consume the 15k/day API budget, and demos run against real records.
 
 ---
 
@@ -385,18 +527,18 @@ Confirmation logic lives in the tool contract, not just the prompt. `preview_opp
 
 | Tool | Kind | Notes |
 |---|---|---|
-| `search_accounts` | read | Fuzzy name match; the entry point for "I just left ..." |
-| `get_account` | read | Full account with recent activity |
+| `search_accounts` | read | SOSL name search, escaped. The entry point for "I just left ..." |
+| `get_account` | read | Account with related open opportunities |
 | `get_contact` | read | Contact detail by ID or account + name |
 | `get_opportunity` | read | By ID, or open opportunities for an account |
-| `list_tasks` | read | Upcoming tasks for the rep |
-| `preview_opportunity_update` | **preview** | Returns before/after diff. Mutates nothing. |
-| `update_opportunity` | **write** | Requires `idempotency_key` |
-| `create_task` | **write** | Requires `idempotency_key` |
-| `create_activity` | **write** | Requires `idempotency_key` |
-| `create_call_report` | **write** | Requires `idempotency_key` |
+| `list_tasks` | read | Upcoming tasks for the running user |
+| `preview_opportunity_update` | **preview** | Read-only diff with `StageName` resolved against the live picklist |
+| `update_opportunity` | **write** | Absolute values only. `PATCH` by record ID |
+| `create_task` | **write** | Upsert on `Idempotency_Key__c` |
+| `create_activity` | **write** | Completed `Task` of `Type='Call'`, or `Event` for meetings |
+| `create_call_report` | **write** | Completed call Task carrying notes in `Description` |
 
-No delete operations exist. A voice interface with road noise is the wrong place to expose destructive verbs.
+No delete operations exist, and no tool accepts a relative adjustment. A voice interface in a moving car is the wrong place for destructive verbs or arithmetic that compounds on replay.
 
 ---
 
@@ -409,22 +551,31 @@ pyproject.toml                      dependencies, tooling, pytest config
 infra/
   main.bicep                        subscription-scope entry point
   main.parameters.json
-  modules/                          ACA env, container app, ACR, UAMI, monitoring
+  modules/                          ACA env, container app, ACR, UAMI,
+                                    Key Vault, monitoring
+sfdx/
+  force-app/main/default/objects/
+    Task/fields/
+      Idempotency_Key__c.field-meta.xml    External ID + Unique
+    Event/fields/
+      Idempotency_Key__c.field-meta.xml
 src/westlake/
   config.py                         pydantic-settings; fails fast on missing config
-  data/                             JSON fixtures — accounts, contacts,
-                                    opportunities, tasks, activities
   crm/
     models.py                       pydantic domain models
-    provider.py                     CrmProvider Protocol — the swap seam
-    mock_provider.py                JSON reads + in-memory write journal
-    salesforce_provider.py          Phase 2 — REST + OAuth JWT bearer
+    provider.py                     CrmProvider Protocol — the seam
+    salesforce_provider.py          DEFAULT — REST, JWT, describe cache, upsert
+    salesforce_auth.py              sf CLI token (local) / JWT bearer (deployed)
+    salesforce_mapping.py           domain ↔ SObject field translation
+    soql.py                         SOSL/SOQL escaping — the only place it happens
+    fake_provider.py                recorded responses; tests + prompt tuning
+    recordings/                     captured API responses, refreshed not authored
   tools/
     registry.py                     single source of truth for all tools
     handlers.py                     the ten handlers
   api/
     app.py                          FastAPI; routes generated from registry
-    security.py                     API key (P1) → Entra JWT (P2)
+    security.py                     API key → Entra JWT
     openapi.py                      spec exporter
   mcp/
     server.py                       MCP streamable-HTTP over the same registry
@@ -437,52 +588,68 @@ src/westlake/
     audio.py                        PyAudio capture/playback, barge-in queue
     session.py                      shared Voice Live event loop
     cli.py                          agent-mode CLI entry point
-openapi/salesforce-tools.json       generated artifact, committed
-tests/                              handler, idempotency, spec-validity tests
+openapi/crm-tools.json              generated artifact, committed
+scripts/
+  seed_org.py                       creates the demo Account + Opportunity
+  record_fixtures.py                captures live responses for the fake
+  new_jwt_cert.sh                   self-signed cert for the Connected App
+tests/                              handler, idempotency, escaping, spec validity
 docs/                               deep-dive architecture notes
-scripts/                            dev tunnel helper, provisioning wrappers
 ```
 
 ---
 
 ## Implementation plan
 
-### Phase 1 — Tool core
-*No Azure dependency. Fully testable offline.*
+### Phase 1 — Org access and preparation
+*Nothing else can be verified until the API answers.*
 
-1. Scaffold `pyproject.toml`, `config.py`, `.env.example`
-2. Author JSON fixtures in `src/westlake/data/` — seeded with ABC Plastics and the $500K Polyethylene Resin Expansion opportunity from the demo script
-3. Define pydantic models, the `CrmProvider` Protocol, and `MockCrmProvider`
-4. Build `tools/registry.py` — the keystone every other surface generates from
-5. Implement the ten handlers, including `preview_opportunity_update` and idempotency-keyed writes
-6. pytest coverage: handlers, idempotency replay, preview diff correctness
+1. Install the Salesforce CLI, `sf org login web`, confirm API access with a raw REST call
+2. Create the Connected App: digital signatures, self-signed cert, scopes `api` + `refresh_token offline_access`, pre-authorized profile
+3. Deploy `Idempotency_Key__c` to `Task` and `Event` — Text(64), External ID, Unique
+4. Run `scripts/seed_org.py` to create ABC Plastics and the $500K Polyethylene Resin Expansion opportunity at stage `Value Proposition`
+5. Verify the JWT bearer flow independently of the app
 
-### Phase 2 — Tool API and OpenAPI spec
+### Phase 2 — Domain and provider
 
-7. `api/app.py` — FastAPI routes generated from the registry, with explicit `operationId` per tool (these become the agent's tool names)
-8. `api/security.py` — API key validation; anonymous auth is off the table for write endpoints
-9. `api/openapi.py` — export OpenAPI 3.1 with populated `servers[]`, validated in CI
+6. pydantic domain models and the `CrmProvider` Protocol
+7. `salesforce_auth.py` — sf CLI token locally, JWT bearer deployed, with token caching
+8. `soql.py` — SOSL/SOQL escaping with tests over the full reserved-character set **before** any query is built
+9. `salesforce_provider.py` — reads, describe cache, stage resolution, upsert-by-External-ID
+10. `record_fixtures.py` → `fake_provider.py` seeded from real captured responses
 
-### Phase 3 — Foundry agent
+### Phase 3 — Tool core
 
-10. `agent/instructions.py` — the driving-optimized prompt and confirmation policy
-11. `agent/voicelive_config.py` — session config plus 512-char metadata chunk/reassemble helpers
-12. `agent/provision.py` — create/update the agent version with the OpenAPI tool attached
-13. `agent/smoketest.py` — **text-mode** conversation test; proves tool calling before audio enters the picture
+11. `tools/registry.py` — the keystone every other surface generates from
+12. The ten handlers, including `preview_opportunity_update`
+13. pytest against the fake: handlers, idempotency replay, stage resolution, escaping
 
-### Phase 4 — Voice CLI
+### Phase 4 — Tool API and OpenAPI spec
 
-14. `voice/audio.py` — 24 kHz PCM16 mono, 50 ms chunks, sequence-numbered playback for barge-in
-15. `voice/session.py` + `voice/cli.py` — agent-mode connect, proactive greeting, barge-in, dual logging
+14. FastAPI routes generated from the registry, explicit `operationId` per tool
+15. API-key validation; anonymous auth is off the table for endpoints that mutate a real CRM
+16. OpenAPI 3.1 export with populated `servers[]`, validated in CI
 
-### Phase 5 — Deploy
+### Phase 5 — Foundry agent
 
-16. Bicep + `azure.yaml` — ACR, Container Apps, managed identity, monitoring. Foundry project is an input parameter, not created.
-17. `azd up`, repoint the spec's `servers[0].url` at the Container App FQDN, re-provision the agent
+17. Instructions: driving-optimized, preview-before-write, absolute values, stage resolution
+18. Voice Live session config plus 512-char metadata chunk/reassemble helpers
+19. `provision.py` — create/update the agent version with the OpenAPI tool attached
+20. `smoketest.py` — **text-mode** test proving tool calling before audio enters the picture
 
-### Phase 6 — Phase 2 assets and docs
+### Phase 6 — Voice CLI
 
-18. MCP server, `SalesforceProvider` stub, deep-dive docs, stretch-goal design notes
+21. 24 kHz PCM16 mono audio, 50 ms chunks, sequence-numbered playback for barge-in
+22. Agent-mode connect, proactive greeting, barge-in, dual logging
+
+### Phase 7 — Deploy
+
+23. Bicep: ACR, Container Apps, managed identity, **Key Vault for the Salesforce key**, monitoring
+24. `azd up`, repoint `servers[0].url`, re-provision the agent
+
+### Phase 8 — MCP and docs
+
+25. MCP server over the same registry, deep-dive docs, stretch-goal design notes
 
 ---
 
@@ -493,6 +660,8 @@ scripts/                            dev tunnel helper, provisioning wrappers
 | Requirement | Notes |
 |---|---|
 | Python 3.11+ | |
+| Salesforce CLI | `npm i -g @salesforce/cli` — not currently installed |
+| Salesforce Developer Edition org | With **admin/Setup access** — required for the Connected App and custom field |
 | Azure CLI | `az login` — agent mode requires Entra auth |
 | Azure Developer CLI (`azd`) | Deployment |
 | `devtunnel` CLI | Local dev — Foundry must reach your tool API |
@@ -500,11 +669,54 @@ scripts/                            dev tunnel helper, provisioning wrappers
 | Microsoft Foundry project | In a Voice Live–supported region, with a model deployment |
 | Role: **Foundry User** | On the Foundry resource, for your account |
 
+### Salesforce org preparation
+
+```bash
+# 1. Authenticate the CLI to the dev org
+npm i -g @salesforce/cli
+sf org login web --alias devorg --set-default
+sf org display --target-org devorg          # confirm connection
+
+# 2. Generate a keypair for the Connected App
+./scripts/new_jwt_cert.sh                   # writes .secrets/server.key + server.crt
+
+# 3. Create the Connected App in Setup > App Manager:
+#      - Enable OAuth Settings
+#      - Callback URL: http://localhost:1717/OauthRedirect
+#      - Use digital signatures -> upload .secrets/server.crt
+#      - Scopes: api, refresh_token offline_access
+#      - After save: Manage > Edit Policies > Permitted Users =
+#        "Admin approved users are pre-authorized", then assign your profile
+#    Copy the Consumer Key into SF_CLIENT_ID
+
+# 4. Deploy the idempotency field
+sf project deploy start --source-dir sfdx/force-app --target-org devorg
+
+# 5. Seed the demo records
+python -m scripts.seed_org
+
+# 6. Capture fixtures for the offline fake
+python -m scripts.record_fixtures
+```
+
+> `.secrets/` is gitignored. `server.key` is the credential that grants API access to the org — it belongs in Key Vault, never in the repo or the container image.
+
 ### Configuration
 
 Copy `.env.example` to `.env` and fill in:
 
 ```bash
+# Provider selection
+CRM_PROVIDER=salesforce          # or 'fake' for offline prompt iteration
+
+# Salesforce
+SF_LOGIN_URL=https://login.salesforce.com   # test.salesforce.com for sandboxes
+SF_CLIENT_ID=<Connected App consumer key>
+SF_USERNAME=<integration user>
+SF_PRIVATE_KEY_PATH=.secrets/server.key     # local only; Key Vault when deployed
+SF_API_VERSION=<pin after checking /services/data>
+SF_ORG_ALIAS=devorg                         # used by the sf CLI auth path
+
 # Foundry project
 PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
 PROJECT_NAME=<project>
@@ -516,7 +728,7 @@ VOICELIVE_API_VERSION=<pin to installed SDK — see note below>
 VOICE_NAME=en-US-Ava:DragonHDLatestNeural
 
 # Agent
-AGENT_NAME=westlake-sales-companion
+AGENT_NAME=crm-sales-companion
 AGENT_VERSION=            # optional — pin for controlled rollout
 CONVERSATION_ID=          # optional — resume a prior conversation
 
@@ -525,7 +737,7 @@ TOOL_API_BASE_URL=https://<devtunnel-or-aca-fqdn>
 TOOL_API_KEY=<generated>
 ```
 
-> **Version pinning.** Current docs show `2026-01-01-preview` for agent-mode connect and `2026-04-10` for model mode. Pin both against the installed `azure-ai-voicelive` and `azure-ai-projects` versions before writing session code rather than trusting the doc snippets.
+> **Version pinning.** Current docs show `2026-01-01-preview` for agent-mode connect and `2026-04-10` for model mode. Pin both against the installed `azure-ai-voicelive` and `azure-ai-projects` versions before writing session code rather than trusting the doc snippets. Same for the Salesforce REST version — read `/services/data` and pin it.
 
 ---
 
@@ -536,32 +748,37 @@ TOOL_API_KEY=<generated>
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. Tests — no Azure needed
+# 2. Tests — offline, no Azure or Salesforce needed
 pytest
 
-# 3. Generate and validate the OpenAPI spec
-python -m westlake.api.openapi
-openapi-spec-validator openapi/salesforce-tools.json
+# 3. Confirm live Salesforce access
+python -m westlake.crm.salesforce_provider --check     # whoami + describe + API limits
 
-# 4. Run the tool API
+# 4. Generate and validate the OpenAPI spec
+python -m westlake.api.openapi
+openapi-spec-validator openapi/crm-tools.json
+
+# 5. Run the tool API against the dev org
 uvicorn westlake.api.app:app --reload --port 8000
 
-# 5. Expose it to Foundry (separate terminal)
+# 6. Expose it to Foundry (separate terminal)
 devtunnel host -p 8000 --allow-anonymous
 # Copy the tunnel URL into TOOL_API_BASE_URL
 
-# 6. Provision the agent
+# 7. Provision the agent
 az login
 python -m westlake.agent.provision
 
-# 7. Text-mode smoke test — verify tool calling before touching audio
+# 8. Text-mode smoke test — verify tool calling before touching audio
 python -m westlake.agent.smoketest
 
-# 8. Full voice conversation
+# 9. Full voice conversation
 python -m westlake.voice.cli
 ```
 
-Step 7 exists deliberately. Debugging tool invocation and audio plumbing simultaneously is miserable; proving the agent calls tools correctly over text first removes an entire class of confusion from step 8.
+Step 8 exists deliberately. Debugging tool invocation and audio plumbing simultaneously is miserable; proving the agent calls tools correctly over text first removes an entire class of confusion from step 9.
+
+While iterating on agent instructions, set `CRM_PROVIDER=fake`. Prompt tuning takes dozens of runs, and each live turn spends several of Developer Edition's 15,000 daily API calls while leaving real Tasks behind in the org. Switch back to `salesforce` to validate.
 
 ---
 
@@ -591,23 +808,25 @@ python -m westlake.agent.provision
 
 | # | Check | Command |
 |---|---|---|
-| 1 | Handlers, idempotency replay, preview diffs | `pytest` |
-| 2 | OpenAPI spec is valid 3.1 with populated `servers[]` | `python -m westlake.api.openapi && openapi-spec-validator openapi/salesforce-tools.json` |
-| 3 | Every operation responds against JSON mocks | `uvicorn ...` + curl each `operationId` |
-| 4 | Agent invokes tools correctly | `python -m westlake.agent.smoketest` |
-| 5 | Full spoken loop | `python -m westlake.voice.cli` |
-| 6 | Deployed path | `azd up` → re-provision → repeat 5 |
+| 1 | Handlers, idempotency replay, stage resolution, query escaping | `pytest` |
+| 2 | Live org reachable; JWT flow works; field deployed | `python -m westlake.crm.salesforce_provider --check` |
+| 3 | OpenAPI spec is valid 3.1 with populated `servers[]` | `python -m westlake.api.openapi && openapi-spec-validator openapi/crm-tools.json` |
+| 4 | Every operation responds against the dev org | `uvicorn ...` + curl each `operationId` |
+| 5 | Agent invokes tools correctly | `python -m westlake.agent.smoketest` |
+| 6 | Full spoken loop | `python -m westlake.voice.cli` |
+| 7 | Deployed path | `azd up` → re-provision → repeat 6 |
 
-**Acceptance script for check 5** — speak the demo conversation end to end:
+**Acceptance script for check 6** — speak the demo conversation end to end:
 
-1. "I just left ABC Plastics" → agent reads back the open opportunity
-2. "Raise it to 750 thousand and move it to Proposal" → agent reads back the **diff** and waits
+1. "I just left ABC Plastics" → agent reads back the open opportunity at `Value Proposition`
+2. "Raise it to 750 thousand and move it to Proposal" → agent reads back the **diff**, having resolved `Proposal` → `Proposal/Price Quote`, and waits
 3. Interrupt mid-sentence → playback stops immediately, agent yields
 4. "Yes" → agent confirms the write in four words or fewer
-5. "Create a follow-up task to send pricing next Friday" → task created, date read back
-6. Repeat step 5 verbatim → **no duplicate task is created**
+5. Verify in the Salesforce UI that Amount and Stage actually changed
+6. "Create a follow-up task to send pricing next Friday" → task created, date read back
+7. Repeat step 6 verbatim → agent says it already exists, and **the org contains exactly one Task**
 
-Step 6 is the one people skip. It's the one that matters in a car.
+Step 7 is the one people skip. It's the one that matters in a car — and now it's verifiable by querying the org rather than trusting an in-memory counter.
 
 ---
 
@@ -618,6 +837,7 @@ Step 6 is the one people skip. It's the one that matters in a car.
 - **Browser voice client.** Web Audio capture → WebSocket relay in Container Apps → Voice Live. Phone-friendly, no local audio dependencies, and the natural demo vehicle for a rep in a vehicle.
 - **Managed identity for the tool API.** Replace the API-key connection with Foundry managed identity plus Entra JWT validation at the Container App.
 - **Conversation resume.** Thread `conversation_id` through reconnects so a dropped cellular connection resumes mid-thought instead of starting over.
+- **Per-rep record ownership.** Today one integration user owns every write. Real deployment needs the rep's own Salesforce identity so `OwnerId` and `CreatedById` reflect who actually spoke.
 
 ### Stretch capabilities
 
@@ -630,7 +850,8 @@ Step 6 is the one people skip. It's the one that matters in a car.
 
 ### Platform
 
-- **Multi-rep identity.** Today the assistant assumes a single rep. Real deployment needs per-rep Entra identity flowing through to Salesforce record ownership.
+- **Multi-rep identity.** Per-rep Entra identity federated to Salesforce, so the assistant acts *as* the rep rather than as a shared integration user.
 - **Evaluation suite.** Batch evals over recorded conversations for tool-selection accuracy and confirmation compliance — the two behaviors that must not regress.
-- **Custom voice.** A brand-aligned Westlake voice via Azure custom neural voice (requires eligibility approval).
+- **Custom voice.** A brand-aligned voice via Azure custom neural voice (requires eligibility approval).
 - **Telephony.** The same agent behind a phone number for reps without the app.
+- **Production org hardening.** Field-level security review, a dedicated integration profile with least-privilege object permissions, and API call budgeting against the production org's limits.
