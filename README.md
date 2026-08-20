@@ -1,4 +1,4 @@
-# Westlake Sales Companion
+# CRM Sales Companion
 
 A hands-free voice sales assistant for Westlake Chemical field reps, built on **Microsoft Foundry Agent Service** and the **Voice Live API**.
 
