@@ -54,4 +54,13 @@
     <!-- Voice_Write_Log__c.Idempotency_Key__c is omitted on purpose: it is a
          required field, and Salesforce rejects explicit FLS on required fields
          because their access is implicit. -->
+
+    <!-- Lets the seed script set CreatedDate so pipeline age is demonstrable.
+         Requires Setup > User Interface > "Set Audit Fields upon Record
+         Creation" to be enabled first, otherwise this permission does not
+         exist to grant and the deploy fails. -->
+    <userPermissions>
+        <name>CreateAuditFields</name>
+        <enabled>true</enabled>
+    </userPermissions>
 </PermissionSet>

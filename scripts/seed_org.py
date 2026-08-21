@@ -129,11 +129,11 @@ async def _ensure_account(sf: SalesforceClient, name: str, *, dry_run: bool) -> 
 
     account_id = await sf.create(
         "Account",
+        # No address fields: orgs with State/Country picklists reject a state
+        # without a country, and they add nothing to the scenario.
         {
             "Name": name,
             "Industry": "Construction",
-            "BillingCity": "Columbus",
-            "BillingState": "OH",
             "Description": "Demo account for the voice CRM companion POC.",
         },
     )

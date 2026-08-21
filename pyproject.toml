@@ -40,7 +40,9 @@ packages = ["src/crm_companion"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-q --strict-markers"
+# Live tests are opt-in: they need credentials, spend API quota, and mutate the
+# org. Run them with `pytest -m liveorg`.
+addopts = "-q --strict-markers -m 'not liveorg'"
 asyncio_mode = "auto"
 markers = ["liveorg: hits the real Salesforce org; deselected by default"]
 

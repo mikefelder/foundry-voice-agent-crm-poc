@@ -116,6 +116,11 @@ class SalesforceClient:
         records = await self.query(soql, max_records=1)
         return records[0] if records else None
 
+    async def search(self, sosl: str) -> list[dict[str, Any]]:
+        """Run SOSL. Preferred over SOQL LIKE for free-text name matching."""
+        payload = await self._request("GET", f"{self.data_path}/search", params={"q": sosl})
+        return list(payload.get("searchRecords", []))
+
     async def count(self, soql: str) -> int:
         """Run an aggregate COUNT() query and return the scalar."""
         records = await self.query(soql)

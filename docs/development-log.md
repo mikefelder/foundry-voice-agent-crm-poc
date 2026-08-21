@@ -1,0 +1,213 @@
+# Development log
+
+A record of what was built, what was verified against a real org, and what bit us
+along the way. Weighted toward findings rather than a changelog — the code shows
+*what* it does, this explains *why* it does it that way.
+
+Companion to the [README](../README.md), which describes the target architecture.
+
+---
+
+## Status
+
+| Layer | State |
+|---|---|
+| Salesforce org: metadata, permissions, demo data | ✅ deployed and verified |
+| `soql.py` — escaping and ID validation | ✅ 56 tests |
+| `models.py` — domain model | ✅ frozen, `extra="forbid"` |
+| `config.py` — settings and guards | ✅ per-subsystem validation |
+| `salesforce_auth.py` — sf CLI + JWT bearer | ✅ both providers |
+| `salesforce_client.py` — REST transport | ✅ pagination, re-auth, error mapping |
+| `salesforce_mapping.py` — SObject ↔ domain | ✅ config-driven field names |
+| `salesforce_provider.py` — `CrmProvider` impl | ✅ validated against live org |
+| Live integration suite | ✅ 16 tests, `pytest -m liveorg` |
+| `fake_provider.py` + recordings | ⬜ next |
+| Tool registry and handlers | ⬜ |
+| Tool API + OpenAPI spec | ⬜ |
+| Foundry agent + Voice CLI | ⬜ |
+
+```
+pytest              149 passed,  16 deselected   (~1s, no credentials)
+pytest -m liveorg    16 passed, 149 deselected   (~71s, real org)
+```
+
+---
+
+## Verified against a live org
+
+Each of these began as an assumption in the plan. All were proven, and several were
+wrong in ways that would have cost far more to discover later.
+
+### Task and Event custom fields live on `Activity`
+
+Deploying `Idempotency_Key__c` to `Task` or `Event` fails:
+
+```
+Entity Enumeration Or ID: bad value for restricted picklist field: Task
+```
+
+They share the `Activity` object. Define the field once there and it surfaces on both.
+Field-level *security*, however, is still granted per-object as
+`Task.Idempotency_Key__c` and `Event.Idempotency_Key__c` — **defined once, permissioned
+twice**.
+
+### Field-Level Security failure is silent, and looks like a bug elsewhere
+
+Immediately after a successful deploy, `sf sobject describe --sobject Opportunity`
+listed **none** of the new fields. Not an error — an absence. A field without FLS is
+omitted from API responses and dropped on write, so a permissions gap presents exactly
+like a field-mapping bug.
+
+Assigning the permission set and rerunning the identical command made all of them
+appear. Nothing about the fields changed; only who was allowed to see them.
+
+One field *was* visible before the grant: the ledger's `Idempotency_Key__c`, because
+`required` fields have implicit FLS. That is also why it must be omitted from
+`fieldPermissions` — Salesforce rejects explicit FLS on required fields.
+
+### Upsert reports `created` in the response body
+
+The plan specified inspecting HTTP `201` vs `204`. The API is simpler than that:
+
+```jsonc
+PATCH /sobjects/Task/Idempotency_Key__c/{key}
+{ "id": "00T…", "success": true, "created": true }   // then false on replay
+```
+
+Proven: identical PATCH twice → same record id, `created` flips, `COUNT(Id) = 1`.
+Reading the body is more robust than status codes across API versions.
+
+### `/chatter/users` is not a mention-capability filter
+
+It is the purpose-built endpoint and it looks correct. It also returns
+**Identity-licence users**, who resolve by name and can never receive a notification —
+precisely the silent failure the design exists to prevent.
+
+`Profile.UserLicense.Name` is the signal that holds. `resolve_user` uses an **allowlist**
+because the failure directions are asymmetric: excluding a valid user surfaces instantly
+as "can't find them", while including an un-notifiable one has no symptom at all.
+
+### Chatter mentions survive as structured segments
+
+Posting `body.messageSegments = [Text, {type: Mention, id: 005…}, Text]` and reading the
+feed element back returns the `Mention` segment intact, carrying the user id — not
+downgraded to text. The read-back assertion is the regression test; the same content sent
+as a plain string would return three `Text` segments and notify nobody, without erroring.
+
+### `CreatedDate` is insert-only and off by default
+
+Without **Setup → User Interface → "Set Audit Fields upon Record Creation"** plus the
+`CreateAuditFields` permission, every seeded record is created *today* and "oldest entry
+date" becomes meaningless.
+
+This must be decided **before** seeding: `CreatedDate` cannot be set on update, so
+enabling it afterwards means delete-and-recreate. With it enabled, the seeded pipeline
+reports an oldest entry of March 2025 — which is what makes the demo's *"oldest entered
+March last year"* a real answer rather than a scripted one.
+
+### Stage picklist values are not what people say
+
+The stock org ships `Proposal/Price Quote` and `Negotiation/Review`. A rep says
+"proposal" and "negotiation". Writing the spoken string fails. `resolve_stage` matches in
+tiers — exact, normalised-exact, prefix, substring — and returns the *narrowest* tier that
+matches, so `closed` correctly reports two candidates rather than guessing.
+
+### Other org-specific traps
+
+| Symptom | Cause |
+|---|---|
+| `FIELD_INTEGRITY_EXCEPTION` on Account create | State/Country picklists enabled; a state requires a country. Address fields dropped entirely — they add nothing and hurt portability. |
+| `data value too large` on permission set | `<description>` caps at 255 characters. |
+| `only aggregate expressions use field aliasing` | SOQL allows `AS` aliases only on aggregates. |
+
+---
+
+## Environment findings
+
+These are workstation-level and cost real time.
+
+### `npm i -g @salesforce/cli` is blocked behind a registry proxy
+
+The package bundles a pinned `npm` release that the proxy does not mirror:
+
+```
+npm error 404  GET https://<proxy>/npm/-/npm-11.19.0.tgz
+```
+
+The Homebrew cask is deprecated for failing the macOS Gatekeeper check and is disabled
+from 2026-09-01. The **standalone tarball** avoids both — it ships its own Node runtime
+and contacts no registry:
+
+```bash
+curl -fsSL -o /tmp/sf.tar.xz \
+  https://developer.salesforce.com/media/salesforce-cli/sf/channels/stable/sf-darwin-arm64.tar.xz
+tar -xJf /tmp/sf.tar.xz -C ~/.local/
+ln -sf ~/.local/sf/bin/sf ~/.local/bin/sf
+```
+
+### `sf org login web` fails behind a browser proxy
+
+Salesforce redirects correctly to `http://localhost:1717/OauthRedirect`, but a browser
+whose proxy configuration does not exempt loopback cannot reach the listener. The CLI
+reports `AuthTimeoutError`, which reads like the user was slow rather than like a network
+failure. Chrome and Safari bypass proxies for localhost by default; Firefox often does
+not.
+
+`--browser chrome` works. JWT avoids the callback leg entirely.
+
+### The CLI redacts secrets in `--json`
+
+`sf org display --json` returns, literally:
+
+```
+"[REDACTED] Use 'sf org auth show-access-token' to view"
+```
+
+for both `accessToken` and `sfdxAuthUrl`, in every variant including `--verbose`. Passing
+that through as a bearer token produces `INVALID_AUTH_HEADER` — which reads like a
+malformed request, not a masked value.
+
+`SfCliTokenProvider` therefore reads the instance URL from `org display` and the token
+from `org auth show-access-token`, and explicitly rejects anything still beginning with
+`[REDACTED`. A CLI update could reintroduce this silently, so there is a test for it.
+
+---
+
+## Decisions worth remembering
+
+**Live org first, no mock dataset.** Building against invented fixtures tends to produce
+tools shaped around imagined records, with every schema surprise arriving late. Going
+live-first surfaced picklist resolution, External ID upserts and query escaping as
+*design* concerns rather than integration bugs.
+
+**Escaping was built before any query code.** `soql.py` landed first, with 56 tests
+covering the full SOSL reserved-character set and injection breakout attempts. Retrofitting
+escaping is how injection bugs survive.
+
+**Absolute values only, never deltas.** This is what makes updates naturally idempotent —
+`Amount = 750000` twice leaves the same state — so `Opportunity` needs no External ID
+field. A delta-shaped API (`increase_amount_by`) could not be made replay-safe, which is
+why that shape is absent from the tool surface.
+
+**No PII in the repository.** Account, opportunity and mention-target names all resolve
+from `.env` at runtime. Users are looked up by query, never by hardcoded id, so the seed
+script runs against any org.
+
+**Modules were not split for their own sake.** The plan sketched separate
+`aggregates.py`, `chatter.py`, `users.py` and `ledger.py`. Each was 15–20 lines; splitting
+them would have added indirection without separation. `salesforce_mapping.py` stayed
+separate because it genuinely isolates Salesforce vocabulary from the domain model.
+
+---
+
+## Next
+
+1. `record_fixtures.py` → `fake_provider.py`, so `pytest` and prompt iteration run offline
+   without spending the 15,000/day API budget
+2. `tools/registry.py` and handlers
+3. FastAPI tool API and OpenAPI export
+4. Foundry agent provisioning, then the voice CLI
+
+Outstanding questions are tracked in the README: real production field API names, whether
+`Bidding` is the correct product-detail trigger stage, and pinning the Voice Live
+`api_version` against the installed SDK.

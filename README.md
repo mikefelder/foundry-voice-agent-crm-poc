@@ -5,6 +5,9 @@ A hands-free voice sales assistant for field sales representatives, built on **M
 A rep driving between customer sites talks to the assistant like a sales-ops colleague — pulling up accounts, reviewing opportunities, updating amounts and stages, and creating follow-up tasks — without touching a keyboard.
 
 > **Status:** Wired to a live Salesforce Developer Edition org from the start — no mock CRM dataset. A `CrmProvider` seam keeps tools decoupled from the data source, with a recorded in-memory fake used only for tests and offline prompt iteration so `pytest` needs no network and voice tuning doesn't burn API quota or litter the org.
+>
+> Build progress, and the org-specific findings that shaped the design, are recorded in the
+> [development log](docs/development-log.md).
 
 ---
 
@@ -36,6 +39,7 @@ A rep driving between customer sites talks to the assistant like a sales-ops col
 - [Deployment](#deployment)
 - [Verification](#verification)
 - [Future enhancements](#future-enhancements)
+- [Development log](docs/development-log.md)
 
 ---
 
@@ -1098,12 +1102,19 @@ python -m crm_companion.agent.provision
 | # | Check | Command |
 |---|---|---|
 | 1 | Aggregates, idempotency replay, ledger gating, mention resolution, escaping | `pytest` |
-| 2 | Live org reachable; JWT flow works; metadata deployed | `python -m crm_companion.crm.salesforce_provider --check` |
-| 3 | OpenAPI spec is valid 3.1 with populated `servers[]` | `python -m crm_companion.api.openapi && openapi-spec-validator openapi/crm-tools.json` |
-| 4 | Every operation responds against the dev org | `uvicorn ...` + curl each `operationId` |
-| 5 | Agent invokes tools correctly | `python -m crm_companion.agent.smoketest` |
-| 6 | Full spoken loop | `python -m crm_companion.voice.cli` |
-| 7 | Deployed path | `azd up` → re-provision → repeat 6 |
+| 2 | Assumptions only a real org can confirm | `pytest -m liveorg` |
+| 3 | Live org reachable; JWT flow works; metadata deployed | `python -m crm_companion.crm.salesforce_provider --check` |
+| 4 | OpenAPI spec is valid 3.1 with populated `servers[]` | `python -m crm_companion.api.openapi && openapi-spec-validator openapi/crm-tools.json` |
+| 5 | Every operation responds against the dev org | `uvicorn ...` + curl each `operationId` |
+| 6 | Agent invokes tools correctly | `python -m crm_companion.agent.smoketest` |
+| 7 | Full spoken loop | `python -m crm_companion.voice.cli` |
+| 8 | Deployed path | `azd up` → re-provision → repeat 7 |
+
+The offline suite needs no credentials and runs in about a second. `pytest -m liveorg` is
+opt-in because it spends API quota and writes to the org; it covers the things mocks
+cannot — that fields are actually readable, that `Bidding` really is an Open stage, that
+Salesforce genuinely dedupes an upsert, and that a Chatter mention survives as a
+structured segment rather than becoming plain text.
 
 **Acceptance script for check 6** — speak both scenes end to end:
 

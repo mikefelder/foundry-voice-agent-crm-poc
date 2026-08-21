@@ -45,6 +45,20 @@ class Settings(BaseSettings):
     sf_instance_url: str | None = None
     sf_access_token: SecretStr | None = None
 
+    # Custom field API names. Approximated for the POC org; point these at the
+    # real names to run against a production org without touching code.
+    sf_field_comments: str = "Comments__c"
+    sf_field_customer_need: str = "Customer_Need__c"
+    sf_field_idempotency: str = "Idempotency_Key__c"
+    sf_ledger_object: str = "Voice_Write_Log__c"
+
+    # Licences whose holders can actually receive a Chatter mention. An
+    # allowlist because the failure directions are asymmetric: excluding a valid
+    # user surfaces instantly as "can't find them", while including one who can
+    # never be notified fails silently. Identity-licence users are the trap -
+    # they look like ordinary Standard users in every other respect.
+    sf_mention_licenses: str = "Salesforce,Salesforce Platform,Chatter Free,Chatter Only"
+
     # ---- Foundry project ---------------------------------------------------
     project_endpoint: str | None = None
     project_name: str | None = None
@@ -84,6 +98,10 @@ class Settings(BaseSettings):
     @property
     def use_salesforce(self) -> bool:
         return self.crm_provider == "salesforce"
+
+    @property
+    def mention_licenses(self) -> tuple[str, ...]:
+        return tuple(part.strip() for part in self.sf_mention_licenses.split(",") if part.strip())
 
     def require_salesforce_jwt(self) -> None:
         """Server-to-server path: Connected App consumer key plus a signing key."""
