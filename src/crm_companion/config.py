@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     tool_api_base_url: str | None = None
     tool_api_key: SecretStr | None = None
 
+    # ---- Demo data ---------------------------------------------------------
+    # Kept in configuration rather than source so no real names are committed and
+    # the seed script runs against any org.
+    demo_account_name: str = "Contoso Building Supply"
+    demo_opportunity_name: str = "Northgate Commons Phase 2"
+    demo_mention_name: str | None = None
+
     request_timeout_seconds: float = Field(default=15.0, gt=0)
 
     @model_validator(mode="after")

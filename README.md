@@ -367,6 +367,13 @@ The Connected App needs **Use digital signatures** with the public cert uploaded
 
 Salesforce credentials never leave the tool API. The agent holds no Salesforce identity — it authenticates to *our* API, and our API brokers onward. There is no password anywhere in the flow.
 
+> **Reading the local session token.** Recent `sf` CLI versions redact secrets in `--json` output:
+> `org display` returns the literal string `[REDACTED] Use 'sf org auth show-access-token' to view`
+> for both `accessToken` and `sfdxAuthUrl`. Treating that as a token produces
+> `INVALID_AUTH_HEADER`, which reads like a malformed request rather than a masked value.
+> `SfCliTokenProvider` therefore reads the instance URL from `org display` and the token from
+> `org auth show-access-token`, and rejects anything still starting with `[REDACTED`.
+
 ### Metadata bundle
 
 `sf project deploy start --source-dir sfdx/force-app` creates **one custom object, eight custom
