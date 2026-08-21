@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Idempotency_Key__c</fullName>
+    <label>Idempotency Key</label>
+    <description>Key supplied by the voice tool layer. Unique + External ID so creates can be issued as upserts and a replayed voice command updates the same record instead of creating a second one. Defined on Activity, which is the shared parent for Task and Event custom fields.</description>
+    <externalId>true</externalId>
+    <length>64</length>
+    <required>false</required>
+    <trackTrending>false</trackTrending>
+    <type>Text</type>
+    <unique>true</unique>
+</CustomField>

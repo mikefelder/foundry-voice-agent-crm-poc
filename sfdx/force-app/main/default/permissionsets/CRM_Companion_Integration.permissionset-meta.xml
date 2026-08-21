@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <label>CRM Companion Integration</label>
+    <description>FLS for the voice tool layer's custom fields plus access to the Voice Write Log ledger. Metadata-deployed fields carry no FLS by default, and an unreadable field is silently dropped from API responses rather than erroring.</description>
+    <hasActivationRequired>false</hasActivationRequired>
+
+    <objectPermissions>
+        <object>Voice_Write_Log__c</object>
+        <allowRead>true</allowRead>
+        <allowCreate>true</allowCreate>
+        <allowEdit>true</allowEdit>
+        <allowDelete>false</allowDelete>
+        <viewAllRecords>false</viewAllRecords>
+        <modifyAllRecords>false</modifyAllRecords>
+    </objectPermissions>
+
+    <fieldPermissions>
+        <field>Opportunity.Customer_Need__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Opportunity.Comments__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <!-- Idempotency_Key__c is defined once on Activity but its field-level
+         security is granted separately on Task and Event, where it surfaces. -->
+    <fieldPermissions>
+        <field>Task.Idempotency_Key__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Event.Idempotency_Key__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Voice_Write_Log__c.Operation__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Voice_Write_Log__c.Target_Record_Id__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Voice_Write_Log__c.Result_Record_Id__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <!-- Voice_Write_Log__c.Idempotency_Key__c is omitted on purpose: it is a
+         required field, and Salesforce rejects explicit FLS on required fields
+         because their access is implicit. -->
+</PermissionSet>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Customer_Need__c</fullName>
+    <label>Customer Need</label>
+    <description>Manufacturing requirement captured from the field. Consumed downstream by supply chain, so the voice layer writes it verbatim and never summarises it. APPROXIMATED for the POC - confirm the real API name against the production org before relying on this.</description>
+    <externalId>false</externalId>
+    <length>32768</length>
+    <required>false</required>
+    <trackTrending>false</trackTrending>
+    <type>LongTextArea</type>
+    <visibleLines>6</visibleLines>
+</CustomField>

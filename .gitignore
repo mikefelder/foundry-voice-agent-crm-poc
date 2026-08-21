@@ -1,0 +1,43 @@
+# Credentials — never commit
+.secrets/
+*.key
+*.pem
+*.crt
+*.p12
+.env
+.env.*
+!.env.example
+
+# Azure
+.azure/
+
+# Salesforce
+.sf/
+.sfdx/
+sfdx/**/main/default/**/*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Captured API responses may contain org data — opt in explicitly
+src/crm_companion/crm/recordings/*.json
+!src/crm_companion/crm/recordings/.gitkeep
+
+# Runtime
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

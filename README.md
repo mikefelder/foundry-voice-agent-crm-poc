@@ -1,6 +1,6 @@
 # CRM Sales Companion
 
-A hands-free voice sales assistant for Westlake Chemical field reps, built on **Microsoft Foundry Agent Service** and the **Voice Live API**.
+A hands-free voice sales assistant for field sales representatives, built on **Microsoft Foundry Agent Service** and the **Voice Live API**.
 
 A rep driving between customer sites talks to the assistant like a sales-ops colleague — pulling up accounts, reviewing opportunities, updating amounts and stages, and creating follow-up tasks — without touching a keyboard.
 
@@ -18,8 +18,11 @@ A rep driving between customer sites talks to the assistant like a sales-ops col
   - [Provider layer](#provider-layer)
 - [Salesforce integration](#salesforce-integration)
   - [Authentication](#authentication)
+  - [Metadata bundle](#metadata-bundle)
   - [Object mapping](#object-mapping)
-  - [Durable idempotency via External ID](#durable-idempotency-via-external-id)
+  - [Aggregate queries](#aggregate-queries)
+  - [Chatter posts and @mentions](#chatter-posts-and-mentions)
+  - [Durable idempotency](#durable-idempotency)
   - [Picklist resolution](#picklist-resolution)
   - [Query injection safety](#query-injection-safety)
   - [API limits](#api-limits)
@@ -38,34 +41,68 @@ A rep driving between customer sites talks to the assistant like a sales-ops col
 
 ## Target experience
 
-```
-Rep:    I just left ABC Plastics.
-Agent:  Found an open opportunity — Polyethylene Resin Expansion, five hundred
-        thousand, Value Proposition. What do you want to do?
+The scenario comes from field feedback: a rep parked outside a customer, needing to triage that account's pipeline before walking in, then capture the outcome from the car afterwards. Today that means writing a list down on paper on the way in, and typing notes later — if at all.
 
-Rep:    Increase it to seven fifty and move it to Proposal.
-Agent:  Changing the amount from five hundred thousand to seven fifty thousand,
-        and the stage to Proposal Price Quote. Save it?
+**Scene 1 — parked outside the customer, before the meeting**
+
+```
+Rep:    How many open opportunities does Contoso Building Supply have?
+Agent:  Fourteen open. Oldest entered March last year. Six are past their
+        close date.
+
+Rep:    Read me the past due ones.
+Agent:  Northgate Commons Phase 2, forty-two thousand, Bidding, closed date
+        was April 30th.
+        ...
+
+Rep:    Next.
+Agent:  Ashwood Commons, eighteen thousand, Negotiation, was June 15th.
+```
+
+**Scene 2 — back in the car, after the meeting**
+
+```
+Rep:    Update Northgate Commons Phase 2.
+Agent:  Got it. Forty-two thousand, Bidding.
+
+Rep:    Customer need: they want the wide plank finish in slate gray, about
+        twelve hundred square feet.
+Agent:  Customer Need will read: "They want the wide plank finish in slate
+        gray, about twelve hundred square feet." Save it?
 
 Rep:    Yes.
 Agent:  Saved.
 
-Rep:    Create a follow-up task to send pricing next Friday.
-Agent:  Task created for Friday the twenty-eighth, assigned to you.
+Rep:    Push the close date to October 15th.
+Agent:  Close date April 30th to October 15th. Save it?
+
+Rep:    Yes. And post to Chatter that pricing is sent, mention Dana
+        Whitfield to confirm product availability.
+Agent:  Posting to Northgate Commons Phase 2, mentioning Dana Whitfield.
+        Post it?
+
+Rep:    Yes.
+Agent:  Posted. Dana's been notified.
 ```
 
-The rep says *"Proposal"*; Salesforce's stage picklist actually reads `Proposal/Price Quote`. The agent resolves spoken shorthand against the org's real picklist values rather than writing the literal string — see [Picklist resolution](#picklist-resolution).
+Two things in Scene 1 are load-bearing. *"How many"* and *"how many past due"* are answered by a **SOQL aggregate**, not by the model counting records aloud — see [Aggregate queries](#aggregate-queries). And the past-due list is read one at a time on the rep's cue, because a fourteen-item list read continuously to someone in a car is useless.
+
+In Scene 2, `Customer Need` is consumed downstream by supply chain for manufacturing, so it is read back verbatim before writing rather than summarised. The Chatter mention is a real notification to a named user, not text that merely looks like one — see [Chatter posts and @mentions](#chatter-posts-and-mentions).
 
 Design rules baked into the agent instructions:
 
 | Rule | Why |
 |---|---|
 | Responses under ~15 words unless reading back a change | The rep is driving; long responses are unsafe and unusable |
+| Lists are read one item at a time, on cue | Fourteen opportunities read continuously is noise, not information |
+| Counts and dates come from the query, never from the model | Aggregates are exact; LLM arithmetic over 40 records is slow and wrong |
+| Free-text notes read back **verbatim** before writing | Supply chain manufactures from `Customer Need`; a paraphrase is a defect |
 | Read back every field change before writing | Guards against misrecognition of amounts and dates |
 | Never invent a record ID | Writes only accept IDs returned by a read in the same conversation |
 | **Absolute values only, never deltas** | "Set it to 750k" survives a replay; "raise it by 250k" compounds |
 | Every create carries an idempotency key | Road noise and repeated phrases must not create duplicate records |
 | Stage names resolved against the live picklist | Spoken shorthand rarely matches the org's actual values |
+| @mentions resolved to a User ID, ambiguity asked aloud | A mention that doesn't resolve fails **silently** — nobody is notified |
 | Deep noise suppression + semantic VAD | Car cabin audio, engine noise, passengers, radio |
 
 ---
@@ -83,7 +120,7 @@ graph TB
 
     subgraph Foundry["Microsoft Foundry"]
         VL["Voice Live API<br/>WebSocket · Realtime-compatible"]
-        AGENT["Westlake Sales Companion<br/>Prompt Agent"]
+        AGENT["CRM Sales Companion<br/>Prompt Agent"]
         MODEL["Model deployment<br/>gpt-realtime"]
     end
 
@@ -167,44 +204,68 @@ sequenceDiagram
     participant T as CRM Tool API
     participant D as CrmProvider
 
-    R->>A: "I just left ABC Plastics"
-    A->>T: search_accounts(query="ABC Plastics")
+    R->>A: "How many open opps does Contoso Building Supply have?"
+    A->>T: search_accounts(query="Contoso Building Supply")
     T->>D: SOSL FIND, escaped
     D-->>T: 001xx… Account
-    T-->>A: accounts[]
-    A->>T: get_opportunity(account_id="001xx…", open_only=true)
-    T-->>A: 006xx… · $500,000 · Value Proposition
-    A-->>R: "Polyethylene Resin Expansion, five hundred thousand,<br/>Value Proposition."
-
-    R->>A: "Raise it to 750k, move to Proposal"
-    rect rgba(255,193,7,0.15)
-        Note over A,T: Preview — read-only, resolves the picklist
-        A->>T: preview_opportunity_update(006xx…, amount=750000, stage="Proposal")
-        T->>D: describe Opportunity (cached)
-        D-->>T: StageName values[]
-        T-->>A: diff{amount: 500000→750000,<br/>stage: Value Proposition→Proposal/Price Quote}
+    rect rgba(0,120,212,0.12)
+        Note over A,D: Aggregate — the query counts, not the model
+        A->>T: get_pipeline_summary(account_id="001xx…")
+        T->>D: SELECT COUNT(Id), MIN(CreatedDate)<br/>WHERE IsClosed=false
+        T->>D: SELECT COUNT(Id) WHERE IsClosed=false<br/>AND CloseDate < TODAY
+        D-->>T: 14 · 2025-03-11 · 6
     end
-    A-->>R: "Five hundred thousand to seven fifty thousand,<br/>stage to Proposal Price Quote. Save it?"
+    A-->>R: "Fourteen open. Oldest March last year.<br/>Six past their close date."
+
+    R->>A: "Read me the past due ones"
+    A->>T: list_past_due_opportunities(account_id="001xx…")
+    T-->>A: 6 records, ordered by CloseDate
+    A-->>R: reads one, waits for cue
+
+    Note over R,D: — meeting happens —
+
+    R->>A: "Customer need: six inch cedar texture, slate gray…"
+    rect rgba(255,193,7,0.15)
+        Note over A,T: Preview — read-only, resolves picklists
+        A->>T: preview_opportunity_update(006xx…,<br/>customer_need="…", close_date=2026-10-15)
+        T->>D: describe Opportunity (cached)
+        T-->>A: diff{Customer_Need__c: ∅→"…",<br/>CloseDate: 2026-04-30→2026-10-15}
+    end
+    A-->>R: reads the note back **verbatim**, "Save it?"
 
     R->>A: "Yes"
     rect rgba(16,124,16,0.15)
-        Note over A,T: Commit — absolute values, no deltas
-        A->>T: update_opportunity(006xx…, amount=750000,<br/>stage="Proposal/Price Quote")
+        A->>T: update_opportunity(006xx…, absolute values)
         T->>D: PATCH /sobjects/Opportunity/006xx…
         D-->>T: 204 No Content
-        T-->>A: {status: "committed", record: {...}}
     end
     A-->>R: "Saved."
+
+    R->>A: "Post to Chatter, mention Dana Whitfield"
+    A->>T: resolve_user(name="Dana Whitfield")
+    T-->>A: 005xx… (exactly one match)
+    rect rgba(92,45,145,0.15)
+        Note over A,D: Ledger first, then post — FeedItem<br/>cannot carry an External ID
+        A->>T: post_chatter_update(006xx…, text,<br/>mentions=[005xx…], idempotency_key)
+        T->>D: upsert Voice_Write_Log__c/Idempotency_Key__c
+        D-->>T: created: true — not a replay
+        T->>D: POST /chatter/feed-elements<br/>messageSegments[Mention 005xx…]
+    end
+    A-->>R: "Posted. Dana's been notified."
 ```
 
 | Threat | Mitigation |
 |---|---|
 | Hallucinated record | Writes reject any ID not returned by a read in this conversation |
-| Misheard amount | `preview_opportunity_update` returns a diff the agent must read back verbatim |
+| Miscounted pipeline | Counts and dates come from SOQL aggregates, never model arithmetic |
+| Paraphrased manufacturing note | `Customer Need` read back verbatim; the diff carries the exact string |
+| Misheard amount or date | `preview_opportunity_update` returns a diff the agent reads back |
 | Replayed command compounding a value | Write tools accept absolute values only — never deltas |
-| Duplicate task from repeated speech | Upsert on a **Unique External ID** field — enforced by Salesforce, not by app memory |
+| Duplicate task from repeated speech | Upsert on a **Unique External ID** field — enforced by Salesforce |
+| Duplicate Chatter post | Write ledger upsert gates the post — `FeedItem` can't hold a custom field |
+| **@mention that notifies nobody** | Name resolved to a User ID; ambiguous or unresolved is asked aloud, never guessed |
 | Invalid stage name rejected by the API | Spoken stage resolved against cached `describe` picklist values |
-| Spoken input reaching the query engine | SOSL with escaped reserved characters; no raw interpolation |
+| Spoken input reaching the query engine | SOSL with escaped reserved characters; IDs regex-validated |
 | Background speech triggering a write | Confirmation phrase required; VAD tuned with deep noise suppression |
 | Accidental destructive edit | No delete tools exist in the surface at all |
 
@@ -306,26 +367,169 @@ The Connected App needs **Use digital signatures** with the public cert uploaded
 
 Salesforce credentials never leave the tool API. The agent holds no Salesforce identity — it authenticates to *our* API, and our API brokers onward. There is no password anywhere in the flow.
 
+### Metadata bundle
+
+`sf project deploy start --source-dir sfdx/force-app` creates **one custom object, eight custom
+fields, and one permission set**. Nothing else — no data, no users, no layout changes, no profile
+edits.
+
+| Component | Object | Type | Why it exists |
+|---|---|---|---|
+| `Idempotency_Key__c` | `Activity` | Text(64) · External ID · Unique | Lets task creation be an upsert, so a repeated voice command can't create a second record. Defined once on `Activity`; surfaces on both `Task` and `Event` |
+| `Customer_Need__c` | `Opportunity` | LongTextArea(32768) | The manufacturing note, written verbatim |
+| `Comments__c` | `Opportunity` | LongTextArea(32768) | Dictated meeting notes |
+| `Voice_Write_Log__c` | — | Custom object | Idempotency ledger for records that can't carry their own key |
+| `Idempotency_Key__c` | `Voice_Write_Log__c` | Text(64) · External ID · Unique · required | The ledger key itself |
+| `Operation__c` | `Voice_Write_Log__c` | Text(64) | Which tool issued the write |
+| `Target_Record_Id__c` | `Voice_Write_Log__c` | Text(18) | Record the write targeted |
+| `Result_Record_Id__c` | `Voice_Write_Log__c` | Text(18) | Record the write produced, so a replay can report it |
+| `CRM_Companion_Integration` | — | Permission set | Grants FLS on the above and object access on the ledger |
+
+> **`Task` and `Event` do not take custom fields directly.** They share the `Activity` object,
+> which is where the field is defined. Targeting `Task` or `Event` fails the deploy with
+> `bad value for restricted picklist field`. Field-level *security*, however, is still granted
+> per-object on `Task` and `Event` — the field is defined once but permissioned twice.
+
+#### Three concepts the bundle depends on
+
+**External ID + Unique.** Marking a field as an External ID makes it usable as an alternate key,
+so `PATCH /sobjects/Task/Idempotency_Key__c/{value}` lets Salesforce decide whether that is a
+create or an update. `Unique` is what makes the guarantee real — the database rejects a second
+row with the same key. Without both flags, deduplication degrades to application memory, which
+does not survive a restart or a second replica.
+
+**Field-Level Security.** FLS is per-profile read/edit permission on each individual field,
+layered on top of object permissions. Fields created by a metadata deploy get no FLS by default,
+and `Modify All Data` does not bypass it. An unreadable field is not an error — it is silently
+omitted from query results and dropped on write, so a missing permission looks exactly like a
+field-mapping bug. The permission set removes that ambiguity.
+
+This is observable: immediately after deploying, `sf sobject describe --sobject Opportunity`
+lists none of the new fields. Assign the permission set, re-run the same command unchanged, and
+they all appear. Nothing about the fields changed — only who was allowed to see them.
+
+**Permission set.** A grantable bundle of object and field permissions that can be assigned to a
+user without editing their profile. Assign it to whichever user the integration authenticates as:
+
+```bash
+sf org assign permset --name CRM_Companion_Integration --target-org devorg
+```
+
+The `description` element is capped at **255 characters**; exceeding it fails the deploy with
+`data value too large`.
+
+#### Deliberately not in the bundle
+
+| Omitted | Why |
+|---|---|
+| `Bidding` stage value | `StageName` is a `StandardValueSet`; deploying one **replaces every value in it**. Too much blast radius for one entry — add it in Setup. |
+| Page layout changes | Layout metadata is bulky and overwrites whatever is already there. The fields will not appear in the UI until added manually. |
+| Chatter enablement | Org-level setting, not deployable source. |
+| Users | Created in Setup; the demo needs a second one as an @mention target. |
+| Stretch product fields | Product finish, colour, area, trim length and prices are designed but not yet authored — they are not needed for the core scenario. |
+
+That second row matters during verification: the acceptance script asks you to confirm
+`Customer_Need__c` in the Salesforce UI, and you will not see the field on the Opportunity page
+until you add it to the layout. Until then, read it back with a query instead:
+
+```bash
+sf data query --query "SELECT Id, Name, Customer_Need__c FROM Opportunity LIMIT 5" --target-org devorg
+```
+
 ### Object mapping
 
 | Domain model | Salesforce object | Notable fields |
 |---|---|---|
 | Account | `Account` | `Id`, `Name`, `Industry`, `Phone`, `BillingCity`, `BillingState` |
 | Contact | `Contact` | `Id`, `AccountId`, `Name`, `Title`, `Email`, `Phone` |
-| Opportunity | `Opportunity` | `Id`, `AccountId`, `Name`, `Amount`, `StageName`, `CloseDate`, `IsClosed` |
+| Opportunity | `Opportunity` | `Id`, `AccountId`, `Name`, `Amount`, `StageName`, `CloseDate`, `CreatedDate`, `IsClosed` |
 | Task | `Task` | `Subject`, `ActivityDate`, `WhatId`, `WhoId`, `OwnerId`, `Status`, `Priority`, `Description` |
 | Logged call | `Task` with `Type='Call'`, `Status='Completed'` | Salesforce models a completed call as a Task, not a distinct object |
 | Meeting | `Event` | `Subject`, `StartDateTime`, `WhatId` |
+| Chatter post | `FeedItem` via `/chatter/feed-elements` | Structured `messageSegments`, not a plain string |
+| User (mention target) | `User` | `Id`, `Name`, `IsActive` |
 
 The mapping is explicit in `crm/salesforce_mapping.py` rather than inferred. Field names like `WhatId` and `ActivityDate` carry no meaning to the model, so the domain layer speaks `account_id` and `due_date` and the mapping translates.
 
-### Durable idempotency via External ID
+#### Approximated custom fields
 
-This is the design detail that changed most when moving off mocks.
+The fields the field team actually works in don't exist in a stock Developer Edition org, so the POC creates stand-ins with the same shape and purpose. **These are approximations — real API names must be confirmed against the production org before any of this leaves POC status.**
 
-Deduping an `idempotency_key` in a process-local dictionary works right up until the Container App restarts or scales to a second replica — then a replayed voice command creates a **second real Task in the customer's CRM**. In-process state is the wrong place for this guarantee.
+| Purpose | POC field | Type | Notes |
+|---|---|---|---|
+| Meeting notes / comments | `Comments__c` | Long Text Area (32k) | Production may use standard `Description` |
+| Manufacturing requirement | `Customer_Need__c` | Long Text Area (32k) | **Consumed downstream by supply chain** — written verbatim |
+| Product finish | `Product_Texture__c` | Picklist | Stretch scope |
+| Product colour | `Product_Color__c` | Picklist | Stretch scope |
+| Primary area | `Area_Sqft__c` | Number | Stretch scope |
+| Trim length | `Trim_Linear_Ft__c` | Number | Stretch scope |
+| Area / trim price | `Area_Price__c`, `Trim_Price__c` | Currency | Stretch scope |
+| Write ledger | `Voice_Write_Log__c` | Custom object | Idempotency for objects that can't carry an External ID |
 
-Salesforce can enforce it in the database instead. A custom field on `Task`:
+A `Bidding` value is also added to the `StageName` picklist — field feedback suggests that is the stage which triggers product detail capture, but **that is unconfirmed** and needs verification against the real sales process.
+
+Because the mapping is config-driven, pointing at the production org later is a configuration change plus a `describe` dump, not a rewrite.
+
+### Aggregate queries
+
+*"How many open opportunities, what's the oldest, how many are past due"* is the question that opens the workflow — and it is the wrong job for a language model. Fetching forty records so the model can count them and compare dates is slow, expensive, and unreliable, and the failure is invisible: a confidently wrong number read aloud in a car.
+
+Salesforce answers it directly:
+
+```sql
+-- summary
+SELECT COUNT(Id) total, MIN(CreatedDate) oldest
+FROM Opportunity
+WHERE AccountId = '001xx...' AND IsClosed = false
+
+-- past due
+SELECT Id, Name, Amount, StageName, CloseDate, CreatedDate
+FROM Opportunity
+WHERE AccountId = '001xx...' AND IsClosed = false AND CloseDate < TODAY
+ORDER BY CloseDate ASC
+```
+
+`TODAY` is a SOQL date literal evaluated server-side in the user's locale, so "past due" needs no client clock and no timezone reasoning. `IsClosed` is a formula field maintained by Salesforce from the stage, so it stays correct when stages are customised.
+
+`get_pipeline_summary` returns counts and dates as **structured values**; the agent's only job is to speak them. `list_past_due_opportunities` returns records ordered by `CloseDate` so the agent can read them one at a time on the rep's cue rather than emptying the list into the cabin.
+
+### Chatter posts and @mentions
+
+The requirement is *"put an @Person Name to send an alert to the person we need to update."* The word "alert" is the requirement — a post that merely contains the characters `@Dana Whitfield` notifies nobody. It looks right in the UI and silently does nothing, which is the worst possible failure mode for a hands-free tool.
+
+A real mention is a structured segment referencing a **User ID**:
+
+```json
+POST /services/data/vXX.X/chatter/feed-elements
+{
+  "feedElementType": "FeedItem",
+  "subjectId": "006xx...",
+  "body": {
+    "messageSegments": [
+      { "type": "Text",    "text": "Pricing sent. " },
+      { "type": "Mention", "id": "005xx..." },
+      { "type": "Text",    "text": " please confirm product availability." }
+    ]
+  }
+}
+```
+
+So `resolve_user` sits in front of every mention:
+
+| Resolution outcome | Behaviour |
+|---|---|
+| Exactly one active user matches | Proceed, name read back in the confirmation |
+| Several match | Agent asks aloud which one — never picks |
+| None match | Agent says so and offers to post without the mention |
+| User inactive | Treated as no match |
+
+The same pattern as picklist resolution: resolve against the org, surface ambiguity as a spoken question, never guess.
+
+### Durable idempotency
+
+Deduping an `idempotency_key` in a process-local dictionary works right up until the Container App restarts or scales to a second replica — then a replayed voice command creates a **second real record in the customer's CRM**. In-process state is the wrong place for this guarantee.
+
+For objects that accept custom fields, Salesforce enforces it directly. A custom field on `Task`:
 
 ```xml
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -338,20 +542,22 @@ Salesforce can enforce it in the database instead. A custom field on `Task`:
 </CustomField>
 ```
 
-Creates then become upserts keyed on that field:
+Creates become upserts keyed on that field:
 
 ```http
 PATCH /services/data/vXX.X/sobjects/Task/Idempotency_Key__c/{key}
 ```
 
-| Response | Meaning | What the agent says |
+| Response body | Meaning | What the agent says |
 |---|---|---|
-| `201 Created` | First time this key was seen | "Task created." |
-| `204 No Content` | Replay — same record updated in place | "Already got that one." |
+| `{"id": "00T…", "created": true}` | First time this key was seen | "Task created." |
+| `{"id": "00T…", "created": false}` | Replay — same record, updated in place | "Already got that one." |
 
-The HTTP status distinguishes a genuine create from a replay, so the assistant can respond honestly instead of silently swallowing the duplicate.
+The response body reports which happened, so no HTTP status inspection is needed. Verified against the org: issuing the identical PATCH twice returns the same record id with `created` flipping from `true` to `false`, and `SELECT COUNT(Id) ... WHERE Idempotency_Key__c = ?` returns exactly 1. That flag is what lets the assistant respond honestly to a repeated command instead of silently reporting success twice.
 
-**Updates don't need this.** Setting `Amount = 750000` twice leaves the same state, so `Opportunity` needs no External ID field. That property only holds because write tools accept **absolute values and never deltas** — the reason that rule is enforced in the tool contract rather than left to the prompt.
+**`FeedItem` can't carry a custom field**, so Chatter posts can't use that mechanism. They go through a write ledger instead — a `Voice_Write_Log__c` custom object with its own Unique External ID. The tool upserts the ledger row first; `201` means proceed with the post, `204` means this is a replay and the post is skipped. Same guarantee, one extra call, and it generalises to any future object that can't be extended.
+
+**Updates need none of this.** Setting `CloseDate = 2026-10-15` twice leaves the same state, so `Opportunity` needs no External ID field. That property only holds because write tools accept **absolute values and never deltas** — the reason that rule is enforced in the tool contract rather than left to the prompt.
 
 ### Picklist resolution
 
@@ -365,17 +571,21 @@ Negotiation/Review · Closed Won · Closed Lost
 
 A rep says *"move it to Proposal."* Writing the literal string `Proposal` fails — the value is `Proposal/Price Quote`. So the provider calls `describe` on `Opportunity`, caches the picklist, and resolves spoken shorthand against it. An unresolvable or ambiguous stage is an error the agent surfaces as a spoken question, never a guess.
 
-This generalises: any picklist the tools write to gets resolved the same way, which is what keeps the assistant portable to a real Westlake org with customised stages.
+This generalises: any picklist the tools write to gets resolved the same way, which is what keeps the assistant portable to a production org with customised stages.
 
 ### Query injection safety
 
 `search_accounts` builds a query from **spoken user input**, and the Salesforce REST API has **no bind parameters** for SOQL — the query is a string you assemble. That is a live injection surface.
 
-Mitigation, in order of preference:
+Two distinct input classes, handled differently:
+
+**Record IDs** — always sourced from a prior read, never from speech. Validated against `^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$` before interpolation. A value failing that regex is rejected outright, which makes ID interpolation safe by construction.
+
+**Free text** — account names, note bodies, user names. Never interpolated into SOQL. Handled by:
 
 1. **SOSL for name search** — `FIND {term} IN NAME FIELDS RETURNING Account(Id, Name, Industry)`, with SOSL reserved characters escaped: `? & | ! { } [ ] ( ) ^ ~ * : \ " ' + -`
 2. **Escaped SOQL literals** where SOSL doesn't fit — backslash and single-quote escaped, length-capped, character-class validated
-3. **Never** string-interpolate a raw transcript into a query
+3. **Request bodies, not queries**, for note text — `Customer_Need__c` travels as JSON in a `PATCH` body, so it never touches the query parser at all
 
 Escaping lives in one place, `crm/soql.py`, with tests covering the reserved-character set. It is not open-coded per call site.
 
@@ -395,11 +605,11 @@ graph TB
         DEV["Rep device<br/>CLI · browser · mobile web"]
     end
 
-    subgraph RG["Resource group — rg-westlake-companion"]
+    subgraph RG["Resource group — rg-crm-companion"]
         subgraph AI["Microsoft Foundry — existing"]
             FRES["AI Services resource<br/>Voice Live enabled region"]
             PROJ["Foundry project"]
-            AGT["Prompt Agent<br/>Westlake Sales Companion<br/>+ Voice Live config in metadata"]
+            AGT["Prompt Agent<br/>CRM Sales Companion<br/>+ Voice Live config in metadata"]
             MDL["Model deployment<br/>gpt-realtime"]
             CONN["Custom keys connection<br/>tool API credential"]
         end
@@ -527,16 +737,22 @@ The fake still exists, but it is a recorded test double, not a parallel data mod
 
 | Tool | Kind | Notes |
 |---|---|---|
-| `search_accounts` | read | SOSL name search, escaped. The entry point for "I just left ..." |
+| `search_accounts` | read | SOSL name search, escaped. Entry point for "how many opps does X have" |
 | `get_account` | read | Account with related open opportunities |
-| `get_contact` | read | Contact detail by ID or account + name |
+| `get_pipeline_summary` | read | **Aggregate** — open count, oldest `CreatedDate`, past-due count |
+| `list_past_due_opportunities` | read | `IsClosed = false AND CloseDate < TODAY`, ordered for one-at-a-time reading |
 | `get_opportunity` | read | By ID, or open opportunities for an account |
+| `get_contact` | read | Contact detail by ID or account + name |
 | `list_tasks` | read | Upcoming tasks for the running user |
-| `preview_opportunity_update` | **preview** | Read-only diff with `StageName` resolved against the live picklist |
-| `update_opportunity` | **write** | Absolute values only. `PATCH` by record ID |
+| `resolve_user` | read | Name → User ID for Chatter mentions; ambiguity returned, never guessed |
+| `preview_opportunity_update` | **preview** | Read-only diff, picklists resolved, note text carried verbatim |
+| `update_opportunity` | **write** | Stage, close date, amount. Absolute values only |
+| `update_opportunity_notes` | **write** | `Comments__c` and `Customer_Need__c`. Verbatim, no summarisation |
+| `post_chatter_update` | **write** | Structured `messageSegments` with real mentions; ledger-gated |
 | `create_task` | **write** | Upsert on `Idempotency_Key__c` |
 | `create_activity` | **write** | Completed `Task` of `Type='Call'`, or `Event` for meetings |
 | `create_call_report` | **write** | Completed call Task carrying notes in `Description` |
+| `set_opportunity_product_details` | **write** | *Stretch* — finish, colour, area, trim length, prices |
 
 No delete operations exist, and no tool accepts a relative adjustment. A voice interface in a moving car is the wrong place for destructive verbs or arithmetic that compounds on replay.
 
@@ -553,21 +769,35 @@ infra/
   main.parameters.json
   modules/                          ACA env, container app, ACR, UAMI,
                                     Key Vault, monitoring
+sfdx-project.json                   sf CLI project root, points at sfdx/force-app
 sfdx/
-  force-app/main/default/objects/
-    Task/fields/
-      Idempotency_Key__c.field-meta.xml    External ID + Unique
-    Event/fields/
-      Idempotency_Key__c.field-meta.xml
-src/westlake/
+  force-app/main/default/
+    objects/
+      Activity/fields/Idempotency_Key__c.field-meta.xml  shared by Task + Event
+      Opportunity/fields/
+        Comments__c.field-meta.xml                       approximated
+        Customer_Need__c.field-meta.xml                  approximated
+      Voice_Write_Log__c/                                ledger for FeedItem dedupe
+        Voice_Write_Log__c.object-meta.xml
+        fields/Idempotency_Key__c.field-meta.xml         External ID + Unique
+        fields/Operation__c.field-meta.xml
+        fields/Target_Record_Id__c.field-meta.xml
+        fields/Result_Record_Id__c.field-meta.xml
+    permissionsets/
+      CRM_Companion_Integration.permissionset-meta.xml   FLS for the above
+src/crm_companion/
   config.py                         pydantic-settings; fails fast on missing config
   crm/
     models.py                       pydantic domain models
     provider.py                     CrmProvider Protocol — the seam
     salesforce_provider.py          DEFAULT — REST, JWT, describe cache, upsert
     salesforce_auth.py              sf CLI token (local) / JWT bearer (deployed)
-    salesforce_mapping.py           domain ↔ SObject field translation
-    soql.py                         SOSL/SOQL escaping — the only place it happens
+    salesforce_mapping.py           domain ↔ SObject field translation, config-driven
+    aggregates.py                   COUNT / MIN / past-due SOQL
+    chatter.py                      feed-elements, messageSegments, mention building
+    users.py                        name → User ID resolution + ambiguity
+    ledger.py                       Voice_Write_Log__c upsert gate
+    soql.py                         SOSL/SOQL escaping + ID regex validation
     fake_provider.py                recorded responses; tests + prompt tuning
     recordings/                     captured API responses, refreshed not authored
   tools/
@@ -606,23 +836,25 @@ docs/                               deep-dive architecture notes
 
 1. Install the Salesforce CLI, `sf org login web`, confirm API access with a raw REST call
 2. Create the Connected App: digital signatures, self-signed cert, scopes `api` + `refresh_token offline_access`, pre-authorized profile
-3. Deploy `Idempotency_Key__c` to `Task` and `Event` — Text(64), External ID, Unique
-4. Run `scripts/seed_org.py` to create ABC Plastics and the $500K Polyethylene Resin Expansion opportunity at stage `Value Proposition`
-5. Verify the JWT bearer flow independently of the app
+3. Deploy the metadata bundle — `Idempotency_Key__c` on `Task`/`Event`, the approximated Opportunity fields, the `Bidding` stage value, and `Voice_Write_Log__c`
+4. Confirm Chatter is enabled and a second test user exists to be @mentioned
+5. Run `scripts/seed_org.py` — a demo account with ~14 open opportunities, 6 deliberately past due, spread across stages and entry dates
+6. Verify the JWT bearer flow independently of the app
 
 ### Phase 2 — Domain and provider
 
-6. pydantic domain models and the `CrmProvider` Protocol
-7. `salesforce_auth.py` — sf CLI token locally, JWT bearer deployed, with token caching
-8. `soql.py` — SOSL/SOQL escaping with tests over the full reserved-character set **before** any query is built
-9. `salesforce_provider.py` — reads, describe cache, stage resolution, upsert-by-External-ID
-10. `record_fixtures.py` → `fake_provider.py` seeded from real captured responses
+7. pydantic domain models and the `CrmProvider` Protocol
+8. `salesforce_auth.py` — sf CLI token locally, JWT bearer deployed, with token caching
+9. `soql.py` — escaping and ID regex validation with tests over the full reserved-character set, **before** any query is built
+10. `salesforce_provider.py` — reads, describe cache, stage resolution, upsert-by-External-ID
+11. `aggregates.py`, `users.py`, `chatter.py`, `ledger.py`
+12. `record_fixtures.py` → `fake_provider.py` seeded from real captured responses
 
 ### Phase 3 — Tool core
 
-11. `tools/registry.py` — the keystone every other surface generates from
-12. The ten handlers, including `preview_opportunity_update`
-13. pytest against the fake: handlers, idempotency replay, stage resolution, escaping
+13. `tools/registry.py` — the keystone every other surface generates from
+14. The handlers, including `get_pipeline_summary`, `preview_opportunity_update`, `post_chatter_update`
+15. pytest against the fake: aggregates, idempotency replay, ledger gating, mention resolution, stage resolution, escaping
 
 ### Phase 4 — Tool API and OpenAPI spec
 
@@ -660,7 +892,7 @@ docs/                               deep-dive architecture notes
 | Requirement | Notes |
 |---|---|
 | Python 3.11+ | |
-| Salesforce CLI | `npm i -g @salesforce/cli` — not currently installed |
+| Salesforce CLI | See below — `npm i -g @salesforce/cli` may be blocked by a corporate registry proxy |
 | Salesforce Developer Edition org | With **admin/Setup access** — required for the Connected App and custom field |
 | Azure CLI | `az login` — agent mode requires Entra auth |
 | Azure Developer CLI (`azd`) | Deployment |
@@ -669,35 +901,85 @@ docs/                               deep-dive architecture notes
 | Microsoft Foundry project | In a Voice Live–supported region, with a model deployment |
 | Role: **Foundry User** | On the Foundry resource, for your account |
 
+### Installing the Salesforce CLI
+
+The npm package bundles a pinned `npm` release of its own, which some corporate registry
+proxies do not mirror. The Homebrew cask is deprecated for failing the macOS Gatekeeper check.
+The standalone tarball avoids both — it ships its own Node runtime and touches no registry:
+
+```bash
+curl -fsSL -o /tmp/sf.tar.xz \
+  https://developer.salesforce.com/media/salesforce-cli/sf/channels/stable/sf-darwin-arm64.tar.xz
+tar -xJf /tmp/sf.tar.xz -C ~/.local/
+ln -sf ~/.local/sf/bin/sf ~/.local/bin/sf
+sf --version
+```
+
+Swap `darwin-arm64` for `darwin-x64` or `linux-x64` as needed. Uninstall is
+`rm -rf ~/.local/sf ~/.local/bin/sf`.
+
 ### Salesforce org preparation
 
 ```bash
-# 1. Authenticate the CLI to the dev org
-npm i -g @salesforce/cli
-sf org login web --alias devorg --set-default
-sf org display --target-org devorg          # confirm connection
-
-# 2. Generate a keypair for the Connected App
+# 1. Generate the keypair the Connected App will trust
 ./scripts/new_jwt_cert.sh                   # writes .secrets/server.key + server.crt
 
-# 3. Create the Connected App in Setup > App Manager:
+# 2. Create the Connected App in Setup > App Manager > New Connected App
 #      - Enable OAuth Settings
-#      - Callback URL: http://localhost:1717/OauthRedirect
+#      - Callback URL: http://localhost:1717/OauthRedirect  (required field,
+#        unused by JWT)
 #      - Use digital signatures -> upload .secrets/server.crt
-#      - Scopes: api, refresh_token offline_access
-#      - After save: Manage > Edit Policies > Permitted Users =
-#        "Admin approved users are pre-authorized", then assign your profile
-#    Copy the Consumer Key into SF_CLIENT_ID
+#      - Scopes: "Manage user data via APIs (api)" and
+#                "Perform requests at any time (refresh_token, offline_access)"
+#      - Save, then Manage > Edit Policies:
+#          Permitted Users = "Admin approved users are pre-authorized"
+#        then Manage > Profiles > add your profile
+#      Copy the Consumer Key into SF_CLIENT_ID
+#
+#      Connected App changes take 2-10 minutes to propagate. The first JWT
+#      attempt failing with invalid_grant usually just means you were early.
 
-# 4. Deploy the idempotency field
+# 3. Authenticate the CLI with JWT - no browser, no localhost callback
+sf org login jwt \
+  --username "<your-org-username>" \
+  --jwt-key-file .secrets/server.key \
+  --client-id "<consumer key>" \
+  --alias devorg --set-default
+
+sf org display --target-org devorg           # confirm connection
+
+# 4. Deploy the metadata bundle
+#    sfdx-project.json is at the repo root, so this runs from there
 sf project deploy start --source-dir sfdx/force-app --target-org devorg
 
-# 5. Seed the demo records
+# 5. Grant the integration user access to the new fields
+#    Metadata-deployed fields carry no field-level security; without this they
+#    are silently absent from API responses and dropped on write.
+sf org assign permset --name CRM_Companion_Integration --target-org devorg
+
+# 6. Add the "Bidding" stage value by hand
+#    Setup > Object Manager > Opportunity > Fields > Stage > New
+#    Deliberately NOT in the metadata bundle: StageName is a StandardValueSet,
+#    and deploying one replaces every value in it. Not worth the blast radius
+#    to add a single entry.
+
+# 7. Confirm Chatter is on and create a second user to @mention
+#    Setup > Chatter Settings > Enable
+#    Setup > Users > New User  (the @mention target used by the demo)
+
+# 8. Seed the demo records
 python -m scripts.seed_org
 
-# 6. Capture fixtures for the offline fake
+# 9. Capture fixtures for the offline fake
 python -m scripts.record_fixtures
 ```
+
+> **On `sf org login web`.** The web flow starts a listener on `localhost:1717` and waits for
+> the browser to redirect back to it. Browsers configured with a corporate proxy that does not
+> exempt loopback will fail to reach it, and the CLI reports `AuthTimeoutError` even though the
+> login itself succeeded. Chrome and Safari bypass proxies for localhost by default; Firefox
+> often does not. JWT avoids the callback leg entirely, which is why it is the documented path
+> here as well as the deployed one.
 
 > `.secrets/` is gitignored. `server.key` is the credential that grants API access to the org — it belongs in Key Vault, never in the repo or the container image.
 
@@ -752,14 +1034,14 @@ pip install -e ".[dev]"
 pytest
 
 # 3. Confirm live Salesforce access
-python -m westlake.crm.salesforce_provider --check     # whoami + describe + API limits
+python -m crm_companion.crm.salesforce_provider --check   # whoami + describe + API limits
 
 # 4. Generate and validate the OpenAPI spec
-python -m westlake.api.openapi
+python -m crm_companion.api.openapi
 openapi-spec-validator openapi/crm-tools.json
 
 # 5. Run the tool API against the dev org
-uvicorn westlake.api.app:app --reload --port 8000
+uvicorn crm_companion.api.app:app --reload --port 8000
 
 # 6. Expose it to Foundry (separate terminal)
 devtunnel host -p 8000 --allow-anonymous
@@ -767,13 +1049,13 @@ devtunnel host -p 8000 --allow-anonymous
 
 # 7. Provision the agent
 az login
-python -m westlake.agent.provision
+python -m crm_companion.agent.provision
 
 # 8. Text-mode smoke test — verify tool calling before touching audio
-python -m westlake.agent.smoketest
+python -m crm_companion.agent.smoketest
 
 # 9. Full voice conversation
-python -m westlake.voice.cli
+python -m crm_companion.voice.cli
 ```
 
 Step 8 exists deliberately. Debugging tool invocation and audio plumbing simultaneously is miserable; proving the agent calls tools correctly over text first removes an entire class of confusion from step 9.
@@ -786,7 +1068,7 @@ While iterating on agent instructions, set `CRM_PROVIDER=fake`. Prompt tuning ta
 
 ```bash
 azd auth login
-azd env new westlake-poc
+azd env new crm-companion-poc
 
 # Point at the existing Foundry project
 azd env set AZURE_AI_PROJECT_ENDPOINT "<project endpoint>"
@@ -796,8 +1078,8 @@ azd up
 
 # Repoint the tool spec at the deployed API and re-register the agent
 azd env get-values | grep TOOL_API_BASE_URL
-python -m westlake.api.openapi
-python -m westlake.agent.provision
+python -m crm_companion.api.openapi
+python -m crm_companion.agent.provision
 ```
 
 `azd up` provisions the Container Apps environment, registry, managed identity, and monitoring, then builds and deploys the tool API. The Foundry project is referenced, never created — the plan assumes you already own it.
@@ -808,25 +1090,32 @@ python -m westlake.agent.provision
 
 | # | Check | Command |
 |---|---|---|
-| 1 | Handlers, idempotency replay, stage resolution, query escaping | `pytest` |
-| 2 | Live org reachable; JWT flow works; field deployed | `python -m westlake.crm.salesforce_provider --check` |
-| 3 | OpenAPI spec is valid 3.1 with populated `servers[]` | `python -m westlake.api.openapi && openapi-spec-validator openapi/crm-tools.json` |
+| 1 | Aggregates, idempotency replay, ledger gating, mention resolution, escaping | `pytest` |
+| 2 | Live org reachable; JWT flow works; metadata deployed | `python -m crm_companion.crm.salesforce_provider --check` |
+| 3 | OpenAPI spec is valid 3.1 with populated `servers[]` | `python -m crm_companion.api.openapi && openapi-spec-validator openapi/crm-tools.json` |
 | 4 | Every operation responds against the dev org | `uvicorn ...` + curl each `operationId` |
-| 5 | Agent invokes tools correctly | `python -m westlake.agent.smoketest` |
-| 6 | Full spoken loop | `python -m westlake.voice.cli` |
+| 5 | Agent invokes tools correctly | `python -m crm_companion.agent.smoketest` |
+| 6 | Full spoken loop | `python -m crm_companion.voice.cli` |
 | 7 | Deployed path | `azd up` → re-provision → repeat 6 |
 
-**Acceptance script for check 6** — speak the demo conversation end to end:
+**Acceptance script for check 6** — speak both scenes end to end:
 
-1. "I just left ABC Plastics" → agent reads back the open opportunity at `Value Proposition`
-2. "Raise it to 750 thousand and move it to Proposal" → agent reads back the **diff**, having resolved `Proposal` → `Proposal/Price Quote`, and waits
-3. Interrupt mid-sentence → playback stops immediately, agent yields
-4. "Yes" → agent confirms the write in four words or fewer
-5. Verify in the Salesforce UI that Amount and Stage actually changed
-6. "Create a follow-up task to send pricing next Friday" → task created, date read back
-7. Repeat step 6 verbatim → agent says it already exists, and **the org contains exactly one Task**
+*Scene 1 — triage*
+1. "How many open opportunities does &lt;demo account&gt; have?" → counts match a manual SOQL run **exactly**
+2. "Read me the past due ones" → reads one, stops, waits
+3. "Next" → reads the second. Confirm it never dumps the whole list
 
-Step 7 is the one people skip. It's the one that matters in a car — and now it's verifiable by querying the org rather than trusting an in-memory counter.
+*Scene 2 — capture*
+4. "Update &lt;demo opportunity&gt;" → correct opportunity identified
+5. Dictate a Customer Need → agent reads it back **word for word**, not summarised
+6. "Yes" → verify in the Salesforce UI that `Customer_Need__c` matches the spoken text exactly
+7. "Push the close date to October 15th" → diff read back, confirmed, written
+8. Interrupt mid-sentence → playback stops immediately, agent yields
+9. "Post to Chatter, mention &lt;demo user&gt;" → confirm, post
+10. **Log in as that user and confirm the notification arrived** — a post containing the literal text `@Name` is a failure, not a pass
+11. Repeat step 9 verbatim → agent says it already posted, and the feed shows **exactly one** post
+
+Steps 6, 10 and 11 are the ones that get skipped, and each covers a failure that is invisible from the driver's seat: a paraphrased manufacturing note, a mention that notifies nobody, and a duplicate post. All three are verifiable in the org rather than by trusting the agent's own account of itself.
 
 ---
 
