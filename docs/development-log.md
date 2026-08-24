@@ -26,11 +26,11 @@ Companion to the [README](../README.md), which describes the target architecture
 | Tool API + OpenAPI spec | ✅ routes generated from the registry |
 | Foundry project + agent | ✅ provisioned, calling tools over Voice Live |
 | Tool API on Container Apps | ✅ deployed, key-authenticated, `CRM_PROVIDER=fake` |
-| Voice CLI | ⬜ next |
+| Voice CLI | ✅ audio in/out, barge-in, interim responses |
 
 ```
-pytest              244 passed,  16 deselected   (~4s, no credentials)
-pytest -m liveorg    16 passed, 244 deselected   (~71s, real org)
+pytest              256 passed,  16 deselected   (~4s, no credentials)
+pytest -m liveorg    16 passed, 256 deselected   (~71s, real org)
 ```
 
 ---
@@ -179,6 +179,24 @@ now means updating one connection, not cutting a new agent version.
 The count comes from `get_pipeline_summary`, not from the model counting records, and the
 list is read one item at a time on a cue — both design rules holding under a real call.
 
+### Cancelling with nothing in flight is an error
+
+The barge-in rule reads "on speech, cancel the response". Implemented literally it produces
+a steady stream of:
+
+```
+Cancellation failed: no active response found.
+```
+
+Speech detection fires on any sound, and most of the time the agent is not talking — in a
+moving car, most of the time nothing is talking. Dropping queued playback is always right;
+sending `response.cancel` is only right while a response is actually open, so the handler
+tracks `response.created` / `response.done` and cancels only in between.
+
+The first run also showed the design working: a mis-heard remark produced `agent: One sec…`
+from the interim-response config before the real answer arrived — the silence-filling
+behaviour that keeps a tool call from sounding like a dropped call.
+
 ---
 
 ## Environment findings
@@ -279,8 +297,8 @@ never reappears as a parameter.
 
 ## Next
 
-1. The Voice Live session loop and the voice CLI — audio capture, playback and barge-in
-2. Salesforce Connected App and JWT, so the deployed API can run `CRM_PROVIDER=salesforce`
+1. Salesforce Connected App and JWT, so the deployed API can run `CRM_PROVIDER=salesforce`
+2. Tune VAD thresholds against real car audio rather than a quiet room
 
 Outstanding questions are tracked in the README: real production field API names, whether
 `Bidding` is the correct product-detail trigger stage, and pinning the Voice Live
