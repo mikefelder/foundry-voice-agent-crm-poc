@@ -41,9 +41,7 @@ def narrowest_stage_matches(spoken: str, candidates: tuple[str, ...]) -> tuple[s
     if exact := [candidate for candidate in candidates if candidate == spoken]:
         return tuple(exact)
     if insensitive := [
-        candidate
-        for candidate in candidates
-        if _NON_ALNUM.sub("", candidate.casefold()) == target
+        candidate for candidate in candidates if _NON_ALNUM.sub("", candidate.casefold()) == target
     ]:
         return tuple(insensitive)
     if prefixed := [
@@ -53,9 +51,7 @@ def narrowest_stage_matches(spoken: str, candidates: tuple[str, ...]) -> tuple[s
     ]:
         return tuple(prefixed)
     return tuple(
-        candidate
-        for candidate in candidates
-        if target in _NON_ALNUM.sub("", candidate.casefold())
+        candidate for candidate in candidates if target in _NON_ALNUM.sub("", candidate.casefold())
     )
 
 

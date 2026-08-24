@@ -1,0 +1,97 @@
+"""FastAPI tool API.
+
+Every route is generated from ``TOOLS``, so a tool cannot exist without an
+endpoint or drift from the schema the agent was given.
+
+This module deliberately does not use ``from __future__ import annotations``:
+the generated endpoints carry their parameter model as a real annotation, and
+deferring it to a string would leave FastAPI unable to resolve the schema.
+"""
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from crm_companion.api.security import api_key_guard
+from crm_companion.config import Settings, get_settings
+from crm_companion.crm.factory import provider_scope
+from crm_companion.crm.provider import CrmProvider
+from crm_companion.crm.salesforce_client import SalesforceError
+from crm_companion.tools import RecordNotFound, ToolError
+from crm_companion.tools.registry import TOOLS, ToolSpec
+
+__all__ = ["create_app"]
+
+logger = logging.getLogger(__name__)
+
+TITLE = "CRM Sales Companion Tools"
+VERSION = "1.0.0"
+DESCRIPTION = (
+    "Read and write a sales rep's CRM by voice. Counts come from the datastore, "
+    "writes take absolute values only, and creates are idempotent."
+)
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or get_settings()
+    if settings.tool_api_key is None:
+        logger.warning("TOOL_API_KEY is not set; every request will be rejected")
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with provider_scope(settings) as provider:
+            app.state.provider = provider
+            yield
+
+    app = FastAPI(
+        title=TITLE,
+        version=VERSION,
+        description=DESCRIPTION,
+        lifespan=lifespan,
+        servers=[{"url": settings.tool_api_base_url}] if settings.tool_api_base_url else None,
+    )
+
+    guard = api_key_guard(settings)
+    for tool in TOOLS:
+        _register(app, tool, guard)
+
+    _register_error_handlers(app)
+    return app
+
+
+def _register(app: FastAPI, tool: ToolSpec, guard) -> None:
+    params_model = tool.params
+
+    async def endpoint(params: params_model, request: Request):
+        provider: CrmProvider = request.app.state.provider
+        return await tool.handler(provider, params)
+
+    app.post(
+        f"/tools/{tool.name}",
+        name=tool.name,
+        operation_id=tool.name,
+        summary=tool.name.replace("_", " "),
+        description=tool.description,
+        response_model=tool.result,
+        response_model_exclude_none=False,
+        tags=["write" if tool.is_write else "read"],
+        dependencies=[Depends(guard)],
+    )(endpoint)
+
+
+def _register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(RecordNotFound)
+    async def _missing(request: Request, exc: RecordNotFound) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(ToolError)
+    async def _needs_clarification(request: Request, exc: ToolError) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(SalesforceError)
+    async def _backend_rejected(request: Request, exc: SalesforceError) -> JSONResponse:
+        # Logged rather than returned: the agent says it aloud, so it must stay generic.
+        logger.error("CRM rejected %s: %s", request.url.path, exc)
+        return JSONResponse(status_code=502, content={"detail": "the CRM rejected that request"})

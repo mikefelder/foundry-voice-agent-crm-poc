@@ -22,13 +22,13 @@ Companion to the [README](../README.md), which describes the target architecture
 | `salesforce_provider.py` — `CrmProvider` impl | ✅ validated against live org |
 | Live integration suite | ✅ 16 tests, `pytest -m liveorg` |
 | `fake_provider.py` + recordings | ✅ sanitized live snapshot, stateful writes |
-| Tool registry and handlers | ⬜ |
-| Tool API + OpenAPI spec | ⬜ |
-| Foundry agent + Voice CLI | ⬜ |
+| Tool registry and handlers | ✅ 16 tools, derived idempotency keys |
+| Tool API + OpenAPI spec | ✅ routes generated from the registry |
+| Foundry agent + Voice CLI | ⬜ next |
 
 ```
-pytest              157 passed,  16 deselected   (~1s, no credentials)
-pytest -m liveorg    16 passed, 157 deselected   (~71s, real org)
+pytest              214 passed,  16 deselected   (~2s, no credentials)
+pytest -m liveorg    16 passed, 214 deselected   (~71s, real org)
 ```
 
 ---
@@ -198,13 +198,31 @@ script runs against any org.
 them would have added indirection without separation. `salesforce_mapping.py` stayed
 separate because it genuinely isolates Salesforce vocabulary from the domain model.
 
+**Idempotency keys are derived, not asked for.** The tool schema accepts one, but when it
+is absent the handler hashes the request itself. Asking the model to invent a key gets the
+failure backwards in both directions: a fresh random value on every retry defeats dedupe
+entirely, while a reused one silently collapses two genuinely different tasks. Hashing the
+payload makes "same command twice" and "different command" mean exactly what they say.
+Scoping the hash to a conversation is still open, and belongs with the API layer.
+
+**An ambiguous stage cannot reach a write.** `resolve_stage` is a tool the agent is told to
+call, but `update_opportunity` resolves again and refuses anything that is not exactly one
+match. The instruction is the ergonomics; the refusal is the guarantee.
+
+**The API key is a security scheme, not a header parameter.** Declared with `Header(...)`
+it generated correctly and worked - and published `x-api-key` into the tool schema as an
+optional string for the agent to fill in. A credential the model can supply is a
+credential the model can invent. `APIKeyHeader` moves it into `securitySchemes`, where the
+caller supplies it and the schema does not mention it at all. There is a test asserting it
+never reappears as a parameter.
+
 ---
 
 ## Next
 
-1. `tools/registry.py` and handlers
-2. FastAPI tool API and OpenAPI export
-3. Foundry agent provisioning, then the voice CLI
+1. Foundry agent provisioning: instructions, the OpenAPI tool registration, and a
+   text-mode smoke test before any audio is involved
+2. The Voice Live session loop and the voice CLI
 
 Outstanding questions are tracked in the README: real production field API names, whether
 `Bidding` is the correct product-detail trigger stage, and pinning the Voice Live
