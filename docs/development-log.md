@@ -24,11 +24,13 @@ Companion to the [README](../README.md), which describes the target architecture
 | `fake_provider.py` + recordings | ✅ sanitized live snapshot, stateful writes |
 | Tool registry and handlers | ✅ 16 tools, derived idempotency keys |
 | Tool API + OpenAPI spec | ✅ routes generated from the registry |
-| Foundry agent + Voice CLI | ⬜ next |
+| Foundry project + agent | ✅ provisioned, calling tools over Voice Live |
+| Tool API on Container Apps | ✅ deployed, key-authenticated, `CRM_PROVIDER=fake` |
+| Voice CLI | ⬜ next |
 
 ```
-pytest              214 passed,  16 deselected   (~2s, no credentials)
-pytest -m liveorg    16 passed, 214 deselected   (~71s, real org)
+pytest              244 passed,  16 deselected   (~4s, no credentials)
+pytest -m liveorg    16 passed, 244 deselected   (~71s, real org)
 ```
 
 ---
@@ -119,6 +121,63 @@ matches, so `closed` correctly reports two candidates rather than guessing.
 | `FIELD_INTEGRITY_EXCEPTION` on Account create | State/Country picklists enabled; a state requires a country. Address fields dropped entirely — they add nothing and hurt portability. |
 | `data value too large` on permission set | `<description>` caps at 255 characters. |
 | `only aggregate expressions use field aliasing` | SOQL allows `AS` aliases only on aggregates. |
+
+---
+
+## Verified against Voice Live
+
+Both of these were wrong in the plan, and neither surfaces until a real connection is open.
+
+### A Prompt Agent cannot run on a realtime model
+
+The architecture said the agent's model was `gpt-realtime`. Connecting in agent mode fails:
+
+```
+Foundry agent service response error: This model is not supported by Responses API.
+```
+
+Voice Live in **agent mode** supplies speech itself and delegates reasoning to the Foundry
+agent service, which runs the agent through the **Responses API** — and that API rejects
+realtime models. They are separate roles: Voice Live owns the audio, the agent needs an
+ordinary text deployment. `gpt-4.1-mini` now backs the agent.
+
+The failure is quiet, which is what makes it expensive. `response.done` arrives with no
+content, zero input tokens and zero output tokens; the reason appears only in
+`status_details`. Read as a transcript it looks like the agent simply had nothing to say.
+
+### Instructions are read-only in agent mode
+
+Sending them on `session.update`, exactly as model mode expects, is rejected:
+
+```
+Instructions are read-only and cannot be modified in agent mode
+```
+
+The agent definition owns them. `build_session` therefore omits `instructions` by default,
+and the session config stored in agent metadata carries none — a client replaying that
+config verbatim would otherwise fail on connect.
+
+### The tool credential lives in a project connection
+
+`azure-ai-projects` can read connections but not create them, so the custom-keys connection
+is created against ARM directly. The key belongs there rather than in the agent definition
+for the same reason it is a security scheme rather than a header parameter in the spec: a
+credential the agent carries is a credential that can leak into a tool schema. Rotating it
+now means updating one connection, not cutting a new agent version.
+
+### Scene 1 answers correctly end to end
+
+```
+> How many open opportunities does Demo Building Supply have?
+  Demo Building Supply has fourteen open opportunities.        <- aggregate, 13 words
+
+> Read me the first past due one.
+  Northgate Commons Phase 2. Amount is forty-two thousand,
+  stage Bidding, close date April thirtieth... Next?           <- one item, then waits
+```
+
+The count comes from `get_pipeline_summary`, not from the model counting records, and the
+list is read one item at a time on a cue — both design rules holding under a real call.
 
 ---
 
@@ -220,9 +279,8 @@ never reappears as a parameter.
 
 ## Next
 
-1. Foundry agent provisioning: instructions, the OpenAPI tool registration, and a
-   text-mode smoke test before any audio is involved
-2. The Voice Live session loop and the voice CLI
+1. The Voice Live session loop and the voice CLI — audio capture, playback and barge-in
+2. Salesforce Connected App and JWT, so the deployed API can run `CRM_PROVIDER=salesforce`
 
 Outstanding questions are tracked in the README: real production field API names, whether
 `Bidding` is the correct product-detail trigger stage, and pinning the Voice Live

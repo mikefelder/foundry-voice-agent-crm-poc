@@ -62,7 +62,10 @@ class Settings(BaseSettings):
     # ---- Foundry project ---------------------------------------------------
     project_endpoint: str | None = None
     project_name: str | None = None
-    model_deployment_name: str = "gpt-realtime"
+    # The agent's reasoning model. In agent mode Voice Live supplies speech itself
+    # and runs the agent through the Responses API, which rejects realtime models -
+    # so this is a text deployment, not gpt-realtime.
+    model_deployment_name: str = "gpt-4.1-mini"
 
     # ---- Voice Live --------------------------------------------------------
     voicelive_endpoint: str | None = None
@@ -77,6 +80,9 @@ class Settings(BaseSettings):
     # ---- Tool API ----------------------------------------------------------
     tool_api_base_url: str | None = None
     tool_api_key: SecretStr | None = None
+    # Foundry project connection holding the tool API key, so the key never
+    # appears in the agent definition or the tool schema.
+    tool_connection_id: str | None = None
 
     # ---- Demo data ---------------------------------------------------------
     # Kept in configuration rather than source so no real names are committed and

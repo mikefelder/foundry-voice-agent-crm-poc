@@ -5,6 +5,11 @@
     "description": "Read and write a sales rep's CRM by voice. Counts come from the datastore, writes take absolute values only, and creates are idempotent.",
     "version": "1.0.0"
   },
+  "servers": [
+    {
+      "url": "https://ca-crm-tools-abxqapptakduu.thankfulfield-52748ce0.eastus2.azurecontainerapps.io"
+    }
+  ],
   "paths": {
     "/tools/search_accounts": {
       "post": {
