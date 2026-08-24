@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-24T15:29:45.868654Z",
+  "accounts": [
+    {
+      "id": "001000000000001",
+      "name": "Demo Building Supply",
+      "industry": "Construction",
+      "phone": null,
+      "city": null,
+      "state": null
+    }
+  ],
+  "contacts": [],
+  "opportunities": [
+    {
+      "id": "006000000000001",
+      "account_id": "001000000000001",
+      "name": "Northgate Commons Phase 2",
+      "stage": "Bidding",
+      "close_date": "2026-04-30",
+      "created_date": "2025-03-12T19:30:34Z",
+      "amount": "42000.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000002",
+      "account_id": "001000000000001",
+      "name": "Ashwood Commons",
+      "stage": "Negotiation/Review",
+      "close_date": "2026-06-15",
+      "created_date": "2025-07-16T19:30:35Z",
+      "amount": "18000.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000003",
+      "account_id": "001000000000001",
+      "name": "Cedar Park Townhomes",
+      "stage": "Proposal/Price Quote",
+      "close_date": "2026-07-11",
+      "created_date": "2025-10-27T19:30:35Z",
+      "amount": "95500.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000004",
+      "account_id": "001000000000001",
+      "name": "Harborview Retail Block",
+      "stage": "Bidding",
+      "close_date": "2026-07-30",
+      "created_date": "2025-12-24T19:30:36Z",
+      "amount": "128000.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000005",
+      "account_id": "001000000000001",
+      "name": "Lakeside Medical Annex",
+      "stage": "Value Proposition",
+      "close_date": "2026-08-12",
+      "created_date": "2026-02-16T19:30:36Z",
+      "amount": "61250.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000006",
+      "account_id": "001000000000001",
+      "name": "Fairmont Civic Center",
+      "stage": "Needs Analysis",
+      "close_date": "2026-08-18",
+      "created_date": "2026-03-22T19:30:37Z",
+      "amount": "210000.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000007",
+      "account_id": "001000000000001",
+      "name": "Riverbend Apartments",
+      "stage": "Bidding",
+      "close_date": "2026-09-02",
+      "created_date": "2026-04-22T19:30:38Z",
+      "amount": "74000.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000008",
+      "account_id": "001000000000001",
+      "name": "Stonegate Business Park",
+      "stage": "Proposal/Price Quote",
+      "close_date": "2026-09-16",
+      "created_date": "2026-05-15T19:30:38Z",
+      "amount": "156800.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000009",
+      "account_id": "001000000000001",
+      "name": "Elmwood School Expansion",
+      "stage": "Qualification",
+      "close_date": "2026-09-29",
+      "created_date": "2026-06-05T19:30:39Z",
+      "amount": "88400.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000010",
+      "account_id": "001000000000001",
+      "name": "Summit Ridge Estates",
+      "stage": "Value Proposition",
+      "close_date": "2026-10-14",
+      "created_date": "2026-06-19T19:30:39Z",
+      "amount": "47900.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000011",
+      "account_id": "001000000000001",
+      "name": "Beacon Hill Mixed Use",
+      "stage": "Negotiation/Review",
+      "close_date": "2026-10-31",
+      "created_date": "2026-07-08T19:30:40Z",
+      "amount": "302500.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000012",
+      "account_id": "001000000000001",
+      "name": "Willow Creek Phase 1",
+      "stage": "Prospecting",
+      "close_date": "2026-11-17",
+      "created_date": "2026-07-21T19:30:41Z",
+      "amount": "33750.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000013",
+      "account_id": "001000000000001",
+      "name": "Maple Grove Distribution",
+      "stage": "Needs Analysis",
+      "close_date": "2026-12-03",
+      "created_date": "2026-08-03T19:30:41Z",
+      "amount": "119000.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    },
+    {
+      "id": "006000000000014",
+      "account_id": "001000000000001",
+      "name": "Kingsford Logistics Hub",
+      "stage": "Bidding",
+      "close_date": "2027-01-01",
+      "created_date": "2026-08-15T19:30:42Z",
+      "amount": "265300.0",
+      "is_closed": false,
+      "comments": null,
+      "customer_need": null
+    }
+  ],
+  "tasks": [],
+  "users": [
+    {
+      "id": "005000000000001",
+      "name": "Demo User",
+      "is_active": true
+    }
+  ],
+  "stages": [
+    "Prospecting",
+    "Qualification",
+    "Needs Analysis",
+    "Value Proposition",
+    "Id. Decision Makers",
+    "Perception Analysis",
+    "Proposal/Price Quote",
+    "Negotiation/Review",
+    "Closed Won",
+    "Closed Lost",
+    "Bidding"
+  ]
+}

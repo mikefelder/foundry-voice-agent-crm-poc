@@ -13,7 +13,6 @@ rather than inferred from documentation:
 
 from __future__ import annotations
 
-import re
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -31,6 +30,7 @@ from crm_companion.crm.models import (
     WriteOutcome,
     WriteResult,
 )
+from crm_companion.crm.provider import narrowest_stage_matches
 from crm_companion.crm.salesforce_client import SalesforceClient
 from crm_companion.crm.salesforce_mapping import FieldMap, parse_datetime, parse_decimal
 
@@ -39,8 +39,6 @@ from crm_companion.crm.soql import record_id as validate_id
 from crm_companion.crm.soql import soql_literal, sosl_term
 
 __all__ = ["SalesforceProvider"]
-
-_NON_ALNUM = re.compile(r"[^a-z0-9]")
 
 
 class SalesforceProvider:
@@ -156,7 +154,7 @@ class SalesforceProvider:
         available = await self._sf.picklist_values("Opportunity", "StageName")
         return StageResolution(
             spoken=spoken,
-            matches=_narrowest_match(spoken, available),
+            matches=narrowest_stage_matches(spoken, available),
             available=available,
         )
 
@@ -308,26 +306,3 @@ def _licence_of(row: dict[str, Any]) -> str:
     profile = row.get("Profile") or {}
     licence = profile.get("UserLicense") or {}
     return licence.get("Name") or ""
-
-
-def _normalise(value: str) -> str:
-    return _NON_ALNUM.sub("", value.casefold())
-
-
-def _narrowest_match(spoken: str, candidates: tuple[str, ...]) -> tuple[str, ...]:
-    """Return the most specific tier that matches, so ambiguity is preserved.
-
-    'proposal' reaching 'Proposal/Price Quote' matters; so does 'closed'
-    matching two stages and being reported as ambiguous rather than guessed.
-    """
-    target = _normalise(spoken)
-    if not target:
-        return ()
-
-    if exact := [c for c in candidates if c == spoken]:
-        return tuple(exact)
-    if insensitive := [c for c in candidates if _normalise(c) == target]:
-        return tuple(insensitive)
-    if prefixed := [c for c in candidates if _normalise(c).startswith(target)]:
-        return tuple(prefixed)
-    return tuple(c for c in candidates if target in _normalise(c))

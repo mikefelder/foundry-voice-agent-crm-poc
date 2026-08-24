@@ -11,6 +11,7 @@ they only accept absolute values and are therefore already idempotent.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -26,7 +27,36 @@ from crm_companion.crm.models import (
     WriteResult,
 )
 
-__all__ = ["CrmProvider"]
+__all__ = ["CrmProvider", "narrowest_stage_matches"]
+
+_NON_ALNUM = re.compile(r"[^a-z0-9]")
+
+
+def narrowest_stage_matches(spoken: str, candidates: tuple[str, ...]) -> tuple[str, ...]:
+    """Return only the most-specific matching tier, preserving ambiguity."""
+    target = _NON_ALNUM.sub("", spoken.casefold())
+    if not target:
+        return ()
+
+    if exact := [candidate for candidate in candidates if candidate == spoken]:
+        return tuple(exact)
+    if insensitive := [
+        candidate
+        for candidate in candidates
+        if _NON_ALNUM.sub("", candidate.casefold()) == target
+    ]:
+        return tuple(insensitive)
+    if prefixed := [
+        candidate
+        for candidate in candidates
+        if _NON_ALNUM.sub("", candidate.casefold()).startswith(target)
+    ]:
+        return tuple(prefixed)
+    return tuple(
+        candidate
+        for candidate in candidates
+        if target in _NON_ALNUM.sub("", candidate.casefold())
+    )
 
 
 @runtime_checkable

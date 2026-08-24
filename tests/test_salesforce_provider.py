@@ -7,12 +7,12 @@ import pytest
 
 from crm_companion.config import Settings
 from crm_companion.crm.models import WriteOutcome
+from crm_companion.crm.provider import narrowest_stage_matches
 from crm_companion.crm.salesforce_auth import Credentials
 from crm_companion.crm.salesforce_client import SalesforceClient
 from crm_companion.crm.salesforce_provider import (
     SalesforceProvider,
     _build_segments,
-    _narrowest_match,
 )
 
 STAGES = (
@@ -60,20 +60,20 @@ class TestStageMatching:
         ],
     )
     def test_resolves_spoken_shorthand(self, spoken, expected):
-        assert _narrowest_match(spoken, STAGES) == expected
+        assert narrowest_stage_matches(spoken, STAGES) == expected
 
     def test_ambiguity_is_preserved_not_guessed(self):
-        assert _narrowest_match("closed", STAGES) == ("Closed Won", "Closed Lost")
+        assert narrowest_stage_matches("closed", STAGES) == ("Closed Won", "Closed Lost")
 
     def test_unknown_stage_yields_nothing(self):
-        assert _narrowest_match("banana", STAGES) == ()
+        assert narrowest_stage_matches("banana", STAGES) == ()
 
     def test_empty_input_yields_nothing(self):
-        assert _narrowest_match("   ", STAGES) == ()
+        assert narrowest_stage_matches("   ", STAGES) == ()
 
     def test_exact_match_wins_over_prefix(self):
         # "Closed Won" is an exact hit and must not drag in "Closed Lost".
-        assert _narrowest_match("Closed Won", STAGES) == ("Closed Won",)
+        assert narrowest_stage_matches("Closed Won", STAGES) == ("Closed Won",)
 
 
 class TestSegmentBuilding:

@@ -21,14 +21,14 @@ Companion to the [README](../README.md), which describes the target architecture
 | `salesforce_mapping.py` — SObject ↔ domain | ✅ config-driven field names |
 | `salesforce_provider.py` — `CrmProvider` impl | ✅ validated against live org |
 | Live integration suite | ✅ 16 tests, `pytest -m liveorg` |
-| `fake_provider.py` + recordings | ⬜ next |
+| `fake_provider.py` + recordings | ✅ sanitized live snapshot, stateful writes |
 | Tool registry and handlers | ⬜ |
 | Tool API + OpenAPI spec | ⬜ |
 | Foundry agent + Voice CLI | ⬜ |
 
 ```
-pytest              149 passed,  16 deselected   (~1s, no credentials)
-pytest -m liveorg    16 passed, 149 deselected   (~71s, real org)
+pytest              157 passed,  16 deselected   (~1s, no credentials)
+pytest -m liveorg    16 passed, 157 deselected   (~71s, real org)
 ```
 
 ---
@@ -202,11 +202,9 @@ separate because it genuinely isolates Salesforce vocabulary from the domain mod
 
 ## Next
 
-1. `record_fixtures.py` → `fake_provider.py`, so `pytest` and prompt iteration run offline
-   without spending the 15,000/day API budget
-2. `tools/registry.py` and handlers
-3. FastAPI tool API and OpenAPI export
-4. Foundry agent provisioning, then the voice CLI
+1. `tools/registry.py` and handlers
+2. FastAPI tool API and OpenAPI export
+3. Foundry agent provisioning, then the voice CLI
 
 Outstanding questions are tracked in the README: real production field API names, whether
 `Bidding` is the correct product-detail trigger stage, and pinning the Voice Live
