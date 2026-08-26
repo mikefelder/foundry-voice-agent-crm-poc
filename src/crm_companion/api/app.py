@@ -116,7 +116,8 @@ def _announce(tool_name: str, result, settings: Settings) -> None:
     publish(_WRITE_LABELS.get(tool_name, "Record updated"), f"{base}/{record_id}")
 
 
-class _RevalidatedStatic(StaticFiles):    """A cached stylesheet after a deploy looks exactly like a broken page."""
+class _RevalidatedStatic(StaticFiles):
+    """A cached stylesheet after a deploy looks exactly like a broken page."""
 
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)

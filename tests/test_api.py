@@ -18,7 +18,12 @@ HEADERS = {"x-api-key": API_KEY}
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(_env_file=None, crm_provider="fake", tool_api_key=API_KEY)
+    return Settings(
+        _env_file=None,
+        crm_provider="fake",
+        tool_api_key=API_KEY,
+        sf_instance_url="https://example.my.salesforce.com",
+    )
 
 
 @pytest.fixture
@@ -115,6 +120,26 @@ class TestRoutes:
         assert first.json()["outcome"] == "created"
         assert second.json()["outcome"] == "replayed"
         assert second.json()["record_id"] == first.json()["record_id"]
+
+
+class TestRecordLinks:
+    def test_a_write_puts_a_link_on_screen(self, client):
+        """Voice Live never tells the browser about tool calls, so the API pushes it."""
+        from crm_companion.api.links import subscribe
+
+        with subscribe() as queue:
+            client.post("/tools/create_task", headers=HEADERS, json={"subject": "Send pricing"})
+            link = queue.get_nowait()
+
+        assert link["label"] == "Task created"
+        assert link["url"].startswith("https://example.my.salesforce.com/")
+
+    def test_a_read_publishes_nothing(self, client):
+        from crm_companion.api.links import subscribe
+
+        with subscribe() as queue:
+            client.post("/tools/list_tasks", headers=HEADERS, json={})
+            assert queue.empty()
 
 
 class TestWebClient:
