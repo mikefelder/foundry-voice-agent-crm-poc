@@ -10,10 +10,13 @@ deferring it to a string would leave FastAPI unable to resolve the schema.
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
+from crm_companion.api.realtime import relay
 from crm_companion.api.security import api_key_guard
 from crm_companion.config import Settings, get_settings
 from crm_companion.crm.factory import provider_scope
@@ -25,6 +28,8 @@ from crm_companion.tools.registry import TOOLS, ToolSpec
 __all__ = ["create_app"]
 
 logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 TITLE = "CRM Sales Companion Tools"
 VERSION = "1.0.0"
@@ -58,6 +63,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _register(app, tool, guard)
 
     _register_error_handlers(app)
+
+    @app.websocket("/ws/voice")
+    async def voice(websocket: WebSocket) -> None:
+        await relay(websocket, settings)
+
+    if STATIC_DIR.is_dir():
+        app.mount("/", _RevalidatedStatic(directory=STATIC_DIR, html=True), name="app")
+
     return app
 
 
@@ -79,6 +92,15 @@ def _register(app: FastAPI, tool: ToolSpec, guard) -> None:
         tags=["write" if tool.is_write else "read"],
         dependencies=[Depends(guard)],
     )(endpoint)
+
+
+class _RevalidatedStatic(StaticFiles):
+    """A cached stylesheet after a deploy looks exactly like a broken page."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def _register_error_handlers(app: FastAPI) -> None:

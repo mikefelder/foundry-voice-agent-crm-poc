@@ -27,6 +27,7 @@ Companion to the [README](../README.md), which describes the target architecture
 | Foundry project + agent | ✅ provisioned, calling tools over Voice Live |
 | Tool API on Container Apps | ✅ deployed, key-authenticated, **live Salesforce org** |
 | Voice CLI | ✅ audio in/out, barge-in, interim responses |
+| Browser client | ✅ chat + mic toggle, relayed through the tool API |
 | Connected App + JWT | ✅ deployed as metadata, key in Key Vault |
 
 ```
@@ -390,6 +391,28 @@ rather than a policy one.
 
 The consumer key comes back the same way. Retrieving the app returns `consumerKey` in
 `oauthConfig`, so it never has to be copied out of **Manage Consumer Details** by hand.
+
+### The browser relays through the tool API rather than holding an Entra token
+
+The architecture had the browser connecting straight to Voice Live with an Entra token,
+which means MSAL, an app registration, and a token in page storage. Given how much this
+tenant has already pushed back — conditional access on Graph, forced private Key Vault —
+that is a lot of surface to bet a demo on.
+
+The relay inverts it: browser ↔ FastAPI ↔ Voice Live, JSON for control frames and binary
+for audio in both directions. The property that mattered is unchanged — the client streams
+audio and renders audio, and every tool call still happens server-side — while Entra stays
+out of the page entirely. The API key arrives as the first socket frame, because browsers
+cannot set headers on a WebSocket and a query string would land in logs.
+
+Two things followed from moving Voice Live into the container, and neither was obvious
+until it failed:
+
+- The image installed only the `api` extra, so the relay died on `No module named 'azure'`.
+- The container now authenticates to Voice Live *as itself*. That needs `AZURE_CLIENT_ID`
+  set to the user-assigned identity, so `DefaultAzureCredential` picks the right one, plus
+  **Cognitive Services User** on the Foundry account. Note the role is not `Azure AI User`,
+  which does not exist in this tenant.
 
 ---
 

@@ -11,7 +11,8 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN pip install --no-cache-dir ".[api]"
+# The azure extra is needed by the browser relay, which connects to Voice Live.
+RUN pip install --no-cache-dir ".[api,azure]"
 
 # The recorded fixture ships in the image so CRM_PROVIDER=fake needs no network.
 ENV CRM_PROVIDER=fake \

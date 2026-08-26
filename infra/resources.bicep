@@ -27,6 +27,13 @@ param sfPrivateKeyBase64 string = ''
 @description('Image to run. The default only has to boot; a deploy replaces it.')
 param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
+@description('Foundry settings the browser relay needs to reach Voice Live.')
+param projectEndpoint string = ''
+param projectName string = ''
+param voiceliveEndpoint string = ''
+param voiceliveApiVersion string = ''
+param agentName string = 'crm-sales-companion'
+
 // This subscription forces publicNetworkAccess=Disabled on every vault, so the
 // data plane is only reachable over a private endpoint from inside the VNet.
 var useSalesforce = crmProvider == 'salesforce'
@@ -302,6 +309,13 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
                 name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
                 value: insights.properties.ConnectionString
               }
+              // Names which identity DefaultAzureCredential should use for Voice Live.
+              { name: 'AZURE_CLIENT_ID', value: identity.properties.clientId }
+              { name: 'PROJECT_ENDPOINT', value: projectEndpoint }
+              { name: 'PROJECT_NAME', value: projectName }
+              { name: 'VOICELIVE_ENDPOINT', value: voiceliveEndpoint }
+              { name: 'VOICELIVE_API_VERSION', value: voiceliveApiVersion }
+              { name: 'AGENT_NAME', value: agentName }
             ],
             useSalesforce
               ? [
@@ -328,3 +342,4 @@ output registryLoginServer string = registry.properties.loginServer
 output toolApiBaseUrl string = 'https://${app.properties.configuration.ingress.fqdn}'
 output appInsightsConnectionString string = insights.properties.ConnectionString
 output keyVaultName string = vault.name
+output identityPrincipalId string = identity.properties.principalId

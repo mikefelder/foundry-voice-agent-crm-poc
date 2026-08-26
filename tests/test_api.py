@@ -1,6 +1,9 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from openapi_spec_validator import validate
+from starlette.websockets import WebSocketDisconnect
 
 from crm_companion.api.app import create_app
 from crm_companion.api.openapi import build_spec
@@ -112,6 +115,22 @@ class TestRoutes:
         assert first.json()["outcome"] == "created"
         assert second.json()["outcome"] == "replayed"
         assert second.json()["record_id"] == first.json()["record_id"]
+
+
+class TestWebClient:
+    def test_serves_the_browser_client(self, client):
+        response = client.get("/")
+
+        assert response.status_code == 200
+        assert "CRM Sales Companion" in response.text
+
+    @pytest.mark.parametrize("payload", [{"key": "nope"}, {}], ids=["wrong", "missing"])
+    def test_socket_grants_no_session_without_the_key(self, client, payload):
+        with pytest.raises(WebSocketDisconnect):  # noqa: PT012
+            with client.websocket_connect("/ws/voice") as socket:
+                socket.send_text(json.dumps(payload))
+                # A valid key answers with {"type": "ready"}; this must never arrive.
+                socket.receive_text()
 
 
 class TestSpec:
