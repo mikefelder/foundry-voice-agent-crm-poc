@@ -726,6 +726,24 @@ The MCP tool's `require_approval` defaults to `always`, and that approval handsh
 
 So: **the voice path uses OpenAPI tools.** The MCP server ships as a Phase 2 deliverable exposing the same registry to other clients (IDE agents, chat surfaces), where the approval loop is both available and desirable.
 
+### Salesforce REST directly, not the Salesforce DX MCP Server
+
+Worth stating plainly because the question comes up: this project talks to Salesforce's REST API through its own provider rather than consuming [`@salesforce/mcp`](https://github.com/salesforcecli/mcp). Assessed August 2026, three properties rule it out for this runtime — any one of them alone would.
+
+| | Salesforce DX MCP Server | What this runtime needs |
+|---|---|---|
+| Data surface | `run_soql_query` — one tool, read-only | Update opportunity, create task, post Chatter |
+| Auth | Locally authorized orgs via the `sf` CLI | Server-side JWT bearer, no human at a keyboard |
+| Transport | `npx` stdio, local process | HTTPS endpoint Foundry can reach |
+
+It has no record write tools at all, so the entire Scene 2 half of the demo has nothing to call.
+
+The deeper mismatch survives even if those three are fixed. `run_soql_query` hands the model **raw query power**, which is the exact opposite of what a rep doing 70mph needs. This tool surface is deliberately narrow and opinionated — `preview_opportunity_update` returns a diff to read back, `resolve_stage` refuses to guess between two picklist values, creates carry idempotency keys, and no tool accepts a relative adjustment. Those properties are the product. A general-purpose query tool cannot express them, and a voice agent holding one can invent record IDs, do its own arithmetic, and duplicate records on a repeated phrase.
+
+**Where it genuinely fits: the developer inner loop.** Deploying metadata, running Apex tests, Code Analyzer, LWC scaffolding, querying an org while writing code — that is what its 60+ tools are built for, and it is good at it. It is developer tooling, not a runtime CRM data plane. Salesforce's own docs warn that enabling every toolset "can overwhelm the LLM context."
+
+This is not a bet against MCP. The convergence point is the other direction: `mcp/server.py` publishes *this* registry over MCP, so an MCP-standardised organisation gets the same sixteen voice-safe tools on the protocol it already uses. And because `CrmProvider` is a seam, a future Salesforce MCP server with transactional write tools and a service-principal auth model could be added as another implementation without touching the tool layer.
+
 ### Preview-then-commit instead of client-side confirmation
 
 Confirmation logic lives in the tool contract, not just the prompt. `preview_opportunity_update` is a real read-only endpoint returning a structured diff with the picklist already resolved. The agent is instructed to call it before any mutation. Prompt-only confirmation is one jailbreak away from a bad write; this is defense in depth.

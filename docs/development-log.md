@@ -248,6 +248,79 @@ malformed request, not a masked value.
 from `org auth show-access-token`, and explicitly rejects anything still beginning with
 `[REDACTED`. A CLI update could reintroduce this silently, so there is a test for it.
 
+### Key Vault is private-endpoint only here, which reshapes the network
+
+The architecture puts the Salesforce JWT signing key in Key Vault. The vault provisions,
+but its data plane refuses everything:
+
+```
+Public network access is disabled and request is not from a trusted service
+nor via an approved private link.          code: ForbiddenByConnection
+```
+
+The template asks for `publicNetworkAccess: 'Enabled'`. So does `az keyvault update`,
+which reports `Disabled` straight back — and so does a bare `az keyvault create`, which is
+what confirms this is environmental rather than a template bug. No policy assignment shows
+as non-compliant and the only management group is the tenant root, so it is a tenant-level
+guardrail on the MCAP subscription.
+
+The useful reframe: **this does not block Key Vault, it blocks *public* Key Vault.**
+`publicNetworkAccess: Disabled` is exactly the state a private endpoint expects, so the
+guardrail is pushing toward private networking rather than away from the vault. The
+deployment therefore carries a VNet, a private endpoint, a `privatelink.vaultcore.azure.net`
+zone, and a VNet-integrated Container Apps environment.
+
+Two rules bit on the way, and read together they look like a contradiction:
+
+| Symptom | Cause |
+|---|---|
+| `ManagedEnvironmentV1SubnetDelegationNotAllowed` | Raised while trying to *update* the pre-existing **consumption-only (V1)** environment, which rejects a delegated subnet. |
+| `ManagedEnvironmentSubnetDelegationError` | Raised when *creating* a fresh environment, which defaults to **workload profiles** and requires the `Microsoft.App/environments` delegation. |
+
+Same subnet, opposite demands. The delegation is required — the first error only appeared
+because the old environment was still there. Which leads to the third rule:
+`ManagedEnvironmentCannotAddVnetToExistingEnv`. VNet integration is **create-time only**,
+so retrofitting it means deleting the environment, which changes the app FQDN and forces
+the OpenAPI `servers` URL, the Foundry connection target, and the agent version to be
+re-cut. Budget for that ripple rather than discovering it mid-change.
+
+The signing key itself is written **through ARM**, not uploaded from a workstation.
+`Microsoft.KeyVault/vaults/secrets` is a control-plane resource, so it is not subject to
+the data-plane firewall — which is the only reason a secret can be placed into a
+private-only vault from outside the VNet. Without that the design would be circular. It
+travels as base64 so the multi-line PEM survives as a single parameter, and
+`base64ToString` restores it in the template.
+
+Proven rather than assumed: with `CRM_PROVIDER=salesforce` the revision reaches
+**Running / Healthy** with `sf-private-key` resolving from
+`https://kv-….vault.azure.net/secrets/sf-private-key`, which only happens if the container
+reached the vault over the private endpoint.
+
+### Two azd deployment traps
+
+`azd deploy`'s remote build fails in this environment:
+
+```
+InvalidCorrelationRequestId: The correlation request ID must be a GUID in canonical D format.
+```
+
+It had worked earlier in the same project, so it is intermittent rather than
+configuration. With no local Docker daemon there is no fallback, but `az acr build`
+does the same job and needs neither azd nor Docker:
+
+```bash
+az acr build --registry <acr> --image crm-tools:latest --file Dockerfile .
+az containerapp update -n <app> -g <rg> --image <acr>.azurecr.io/crm-tools:latest
+```
+
+The second trap is quieter. The Bicep template carries a placeholder image so the app can
+boot before any deploy — the standard azd pattern, because `azd deploy` immediately
+replaces it. When the deploy step is broken, every subsequent `azd provision` silently
+reverts the running app to that placeholder, which listens on port 80 and so never passes
+a health probe on 8000. The revision sits in `Activating` forever and the logs blame a
+probe failure rather than the image. The image is now a `containerImage` parameter, so
+provisioning preserves whatever is deployed.
+
 ---
 
 ## Decisions worth remembering

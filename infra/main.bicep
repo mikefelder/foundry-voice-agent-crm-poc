@@ -16,6 +16,19 @@ param toolApiKey string
 @allowed(['fake', 'salesforce'])
 param crmProvider string = 'fake'
 
+@description('Connected App consumer key. Only used when crmProvider is salesforce.')
+param sfClientId string = ''
+
+@description('Salesforce integration user. Only used when crmProvider is salesforce.')
+param sfUsername string = ''
+
+@secure()
+@description('Base64-encoded PEM signing key for the Connected App JWT flow.')
+param sfPrivateKeyBase64 string = ''
+
+@description('Image to run. The default only has to boot; a deploy replaces it.')
+param containerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
+
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
 
@@ -34,6 +47,10 @@ module resources 'resources.bicep' = {
     tags: tags
     toolApiKey: toolApiKey
     crmProvider: crmProvider
+    sfClientId: sfClientId
+    sfUsername: sfUsername
+    sfPrivateKeyBase64: sfPrivateKeyBase64
+    containerImage: containerImage
   }
 }
 

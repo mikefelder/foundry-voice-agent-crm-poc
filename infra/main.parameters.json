@@ -13,6 +13,18 @@
     },
     "crmProvider": {
       "value": "${CRM_PROVIDER=fake}"
+    },
+    "sfClientId": {
+      "value": "${SF_CLIENT_ID=}"
+    },
+    "sfUsername": {
+      "value": "${SF_USERNAME=}"
+    },
+    "sfPrivateKeyBase64": {
+      "value": "${SF_PRIVATE_KEY_BASE64=}"
+    },
+    "containerImage": {
+      "value": "${CONTAINER_IMAGE=mcr.microsoft.com/k8se/quickstart:latest}"
     }
   }
 }

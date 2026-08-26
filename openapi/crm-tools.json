@@ -7,7 +7,7 @@
   },
   "servers": [
     {
-      "url": "https://ca-crm-tools-abxqapptakduu.thankfulfield-52748ce0.eastus2.azurecontainerapps.io"
+      "url": "https://ca-crm-tools-abxqapptakduu.blueocean-50f0c80a.eastus2.azurecontainerapps.io"
     }
   ],
   "paths": {
