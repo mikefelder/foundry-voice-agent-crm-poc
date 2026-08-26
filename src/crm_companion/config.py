@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     sf_field_idempotency: str = "Idempotency_Key__c"
     sf_ledger_object: str = "Voice_Write_Log__c"
 
+    # Stamped on every write the companion makes. Record-level attribution alone
+    # will not carry this: LastModifiedById names the integration user today and
+    # will name the rep once writes are attributed per-person, so neither says
+    # the change arrived by voice.
+    write_source: str = "CRM Sales Companion"
+
     # Licences whose holders can actually receive a Chatter mention. An
     # allowlist because the failure directions are asymmetric: excluding a valid
     # user surfaces instantly as "can't find them", while including one who can

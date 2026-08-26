@@ -30,6 +30,7 @@ __all__ = [
     "ResolveStageParams",
     "ResolveUserParams",
     "SearchAccountsParams",
+    "UndoLastWriteParams",
     "UpdateOpportunityNotesParams",
     "UpdateOpportunityParams",
 ]
@@ -185,4 +186,17 @@ class PostChatterUpdateParams(_CreateParams):
         default=(),
         max_length=10,
         description="User IDs from resolve_user. A name that was never resolved notifies nobody.",
+    )
+
+
+class UndoLastWriteParams(_Schema):
+    """Scoped to one record on purpose.
+
+    An unscoped "last write" is whatever the deployment wrote most recently,
+    which in testing reversed a change to a different record from a different
+    session. The agent always knows the record it just wrote to, so it names it.
+    """
+
+    record_id: RecordId = Field(
+        description="The record just changed. If the rep has not said which, ask before calling.",
     )

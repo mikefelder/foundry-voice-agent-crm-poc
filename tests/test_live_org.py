@@ -11,6 +11,9 @@ stops it silently regressing.
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
+
 import pytest
 
 from crm_companion.crm.models import WriteOutcome
@@ -193,16 +196,30 @@ class TestResolution:
 
 
 class TestSeededPipeline:
-    async def test_aggregate_counts_match_the_seed(self, live_provider, demo_account_id):
+    async def test_aggregate_agrees_with_the_records_it_counts(
+        self, live_provider, demo_account_id
+    ):
+        """Pinning the seeded totals looked stricter but only tracked demo drift.
+
+        What matters is that the SOQL aggregate agrees with the records - that is
+        the guarantee behind never counting rows in Python or in the model.
+        """
         summary = await live_provider.get_pipeline_summary(demo_account_id)
-        assert summary.open_count == 14
-        assert summary.past_due_count == 6
+        open_opportunities = await live_provider.list_open_opportunities(demo_account_id, limit=50)
+        overdue = await live_provider.list_past_due_opportunities(demo_account_id, limit=50)
+
+        assert summary.open_count == len(open_opportunities)
+        assert summary.past_due_count == len(overdue)
+        assert summary.total_open_amount == sum(
+            (o.amount for o in open_opportunities if o.amount is not None), Decimal(0)
+        )
 
     async def test_past_due_list_is_ordered_oldest_first(self, live_provider, demo_account_id):
         overdue = await live_provider.list_past_due_opportunities(demo_account_id)
-        assert len(overdue) == 6
+        assert overdue, "demo account has no overdue pipeline; re-run the seed script"
         close_dates = [o.close_date for o in overdue]
         assert close_dates == sorted(close_dates)
+        assert all(closes < date.today() for closes in close_dates)
 
     async def test_pipeline_age_is_meaningful(self, live_provider, demo_account_id):
         """Without writable audit fields every record is created today."""
@@ -228,5 +245,70 @@ class TestNotesRoundTrip:
             await live_provider.update_opportunity_notes(target.id, customer_need=spoken)
             reread = await live_provider.get_opportunity(target.id)
             assert reread.customer_need == spoken
+        finally:
+            await live_provider.update_opportunity_notes(target.id, customer_need=original or "")
+
+
+class TestProvenanceAndUndo:
+    async def test_a_write_is_attributable_to_the_companion(
+        self, live_client, live_provider, live_settings, demo_account_id
+    ):
+        opportunities = await live_provider.list_open_opportunities(demo_account_id, limit=1)
+        target = opportunities[0]
+        original = target.customer_need
+
+        try:
+            await live_provider.update_opportunity_notes(
+                target.id, customer_need="live test - provenance"
+            )
+            row = await live_client.query_one(
+                "SELECT Source__c, Operation__c, Previous_Values__c FROM "  # noqa: S608
+                f"{live_settings.sf_ledger_object} WHERE Target_Record_Id__c = '{target.id}' "
+                "ORDER BY CreatedDate DESC LIMIT 1"
+            )
+            assert row["Source__c"] == live_settings.write_source
+            assert row["Operation__c"] == "update_opportunity_notes"
+            assert "customer_need" in row["Previous_Values__c"]
+        finally:
+            await live_provider.update_opportunity_notes(target.id, customer_need=original or "")
+
+    async def test_a_misheard_note_can_be_put_back(self, live_provider, demo_account_id):
+        """The whole point: a value the rep never meant to say is recoverable."""
+        opportunities = await live_provider.list_open_opportunities(demo_account_id, limit=1)
+        target = opportunities[0]
+        original = target.customer_need
+
+        try:
+            await live_provider.update_opportunity_notes(
+                target.id, customer_need="live test - said by mistake"
+            )
+            result = await live_provider.undo_last_write(target.id)
+
+            assert result.undone is True
+            reread = await live_provider.get_opportunity(target.id)
+            assert reread.customer_need == original
+        finally:
+            await live_provider.update_opportunity_notes(target.id, customer_need=original or "")
+
+    async def test_undo_heard_twice_does_not_reach_further_back(
+        self, live_provider, demo_account_id
+    ):
+        opportunities = await live_provider.list_open_opportunities(demo_account_id, limit=1)
+        target = opportunities[0]
+        original = target.customer_need
+
+        try:
+            await live_provider.update_opportunity_notes(
+                target.id, customer_need="live test - first change"
+            )
+            await live_provider.update_opportunity_notes(
+                target.id, customer_need="live test - second change"
+            )
+            assert (await live_provider.undo_last_write(target.id)).undone is True
+            repeat = await live_provider.undo_last_write(target.id)
+
+            assert repeat.undone is False
+            reread = await live_provider.get_opportunity(target.id)
+            assert reread.customer_need == "live test - first change"
         finally:
             await live_provider.update_opportunity_notes(target.id, customer_need=original or "")

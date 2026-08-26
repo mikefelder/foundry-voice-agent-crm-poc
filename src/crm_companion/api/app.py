@@ -81,6 +81,7 @@ _WRITE_LABELS = {
     "update_opportunity_notes": "Notes updated",
     "create_task": "Task created",
     "post_chatter_update": "Posted to Chatter",
+    "undo_last_write": "Change put back",
 }
 
 

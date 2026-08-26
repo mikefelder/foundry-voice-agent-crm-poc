@@ -25,6 +25,7 @@ from crm_companion.crm.models import (
     PipelineSummary,
     StageResolution,
     TaskRecord,
+    UndoResult,
     UserResolution,
     WriteResult,
 )
@@ -191,6 +192,19 @@ TOOLS: tuple[ToolSpec, ...] = (
         params=schemas.PostChatterUpdateParams,
         result=WriteResult,
         handler=handlers.post_chatter_update,
+        is_write=True,
+    ),
+    ToolSpec(
+        name="undo_last_write",
+        description=(
+            "Put back the last change made to one record - a misheard amount, a "
+            "task created by mistake. Name the record you just changed. Only its "
+            "most recent change, and only once, so 'undo' repeated over road "
+            "noise cannot unwind more. Say what it reports back to the rep."
+        ),
+        params=schemas.UndoLastWriteParams,
+        result=UndoResult,
+        handler=handlers.undo_last_write,
         is_write=True,
     ),
 )

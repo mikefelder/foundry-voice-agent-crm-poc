@@ -4,7 +4,16 @@ A hands-free voice sales assistant for field sales representatives, built on **M
 
 A rep driving between customer sites talks to the assistant like a sales-ops colleague — pulling up accounts, reviewing opportunities, updating amounts and stages, and creating follow-up tasks — without touching a keyboard.
 
-> **Status:** Wired to a live Salesforce Developer Edition org from the start — no mock CRM dataset. A `CrmProvider` seam keeps tools decoupled from the data source, with a recorded in-memory fake used only for tests and offline prompt iteration so `pytest` needs no network and voice tuning doesn't burn API quota or litter the org.
+> **Status:** Running end to end against a live Salesforce Developer Edition org and deployed to Azure Container Apps. Voice CLI and browser client both work; reads, previewed writes, Chatter mentions, record links and undo are verified against real records.
+>
+> Wired to a live org from the start — no mock CRM dataset. A `CrmProvider` seam keeps tools decoupled from the data source, with a recorded in-memory fake used only for tests and offline prompt iteration so `pytest` needs no network and voice tuning doesn't burn API quota or litter the org.
+>
+> | | |
+> |---|---|
+> | Tools | 17, generated from one registry |
+> | Tests | 290 offline · 20 live-org (`-m liveorg`) |
+> | Verified scenes | Triage · capture · ambiguity · undo |
+> | Known gaps | Telemetry not collected · writes attributed to the integration user · VAD untuned against road noise |
 >
 > Build progress, and the org-specific findings that shaped the design, are recorded in the
 > [development log](docs/development-log.md).
@@ -26,6 +35,7 @@ A rep driving between customer sites talks to the assistant like a sales-ops col
   - [Aggregate queries](#aggregate-queries)
   - [Chatter posts and @mentions](#chatter-posts-and-mentions)
   - [Durable idempotency](#durable-idempotency)
+  - [Provenance and undo](#provenance-and-undo)
   - [Picklist resolution](#picklist-resolution)
   - [Query injection safety](#query-injection-safety)
   - [API limits](#api-limits)
@@ -125,12 +135,11 @@ graph TB
     subgraph Foundry["Microsoft Foundry"]
         VL["Voice Live API<br/>WebSocket · Realtime-compatible"]
         AGENT["CRM Sales Companion<br/>Prompt Agent"]
-        MODEL["Model deployment<br/>gpt-realtime"]
+        MODEL["Model deployment<br/>gpt-4.1-mini"]
     end
 
     subgraph ACA["Azure Container Apps"]
-        API["CRM Tool API<br/>FastAPI"]
-        MCP["MCP Server<br/>later"]
+        API["CRM Tool API<br/>FastAPI + browser relay"]
     end
 
     subgraph Data["Data"]
@@ -143,7 +152,6 @@ graph TB
     VL <-->|"agent_name · project_name"| AGENT
     AGENT --> MODEL
     AGENT -->|"OpenAPI tool · HTTPS"| API
-    MCP -.->|"other clients"| API
     API -->|"REST · JWT bearer"| SF
     API -.->|"CRM_PROVIDER=fake"| FAKE
 
@@ -151,11 +159,11 @@ graph TB
     classDef app fill:#107C10,stroke:#0B5A0B,color:#fff
     classDef data fill:#5C2D91,stroke:#3B1D5E,color:#fff
     class VL,AGENT,MODEL azure
-    class API,MCP,CLI app
+    class API,CLI app
     class SF,FAKE data
 ```
 
-The critical property: **the client never executes tools**. It streams audio and renders audio. All reasoning and all CRM access happen server-side, which means the browser client added later inherits the full capability set with zero additional trust.
+The critical property: **the client never executes tools**. It streams audio and renders audio. All reasoning and all CRM access happen server-side — which is why the browser client, added after the CLI, inherited the full capability set without reimplementing a single tool.
 
 ### Voice flow
 
@@ -199,7 +207,7 @@ Two details that make or break the in-car feel:
 
 ### Tool flow and the write-safety protocol
 
-Writes are gated. The agent cannot mutate a record it has not read, and cannot mutate without an explicit spoken confirmation of a concrete diff.
+Writes are gated. The agent cannot mutate a record it has not read, cannot mutate without an explicit spoken confirmation of a concrete diff, and cannot skip the read-back — the preview issues an HMAC token the write refuses to proceed without.
 
 ```mermaid
 sequenceDiagram
@@ -230,20 +238,32 @@ sequenceDiagram
 
     R->>A: "Customer need: six inch cedar texture, slate gray…"
     rect rgba(255,193,7,0.15)
-        Note over A,T: Preview — read-only, resolves picklists
+        Note over A,T: Preview — read-only, resolves picklists,<br/>issues an HMAC token over these exact values
         A->>T: preview_opportunity_update(006xx…,<br/>customer_need="…", close_date=2026-10-15)
         T->>D: describe Opportunity (cached)
-        T-->>A: diff{Customer_Need__c: ∅→"…",<br/>CloseDate: 2026-04-30→2026-10-15}
+        T-->>A: diff{Customer_Need__c: ∅→"…",<br/>CloseDate: 2026-04-30→2026-10-15}<br/>+ confirmation_tokens
     end
     A-->>R: reads the note back **verbatim**, "Save it?"
 
     R->>A: "Yes"
     rect rgba(16,124,16,0.15)
-        A->>T: update_opportunity(006xx…, absolute values)
+        A->>T: update_opportunity(006xx…, absolute values,<br/>confirmation_token)
+        T->>T: HMAC recomputed — any other value is 409
         T->>D: PATCH /sobjects/Opportunity/006xx…
-        D-->>T: 204 No Content
+        T->>D: log Voice_Write_Log__c{Source__c,<br/>Previous_Values__c}
     end
     A-->>R: "Saved."
+    T-->>R: record link appears on screen
+
+    R->>A: "No, that's wrong. Undo that."
+    rect rgba(209,52,56,0.15)
+        Note over A,D: Scoped to the record — an unscoped<br/>"last write" is not necessarily this rep's
+        A->>T: undo_last_write(006xx…)
+        T->>D: newest un-undone ledger row for 006xx…
+        T->>D: PATCH back Previous_Values__c
+        T->>D: flag the row Undone__c — never deleted
+    end
+    A-->>R: "Amount is back to forty-two thousand."
 
     R->>A: "Post to Chatter, mention Dana Whitfield"
     A->>T: resolve_user(name="Dana Whitfield")
@@ -264,18 +284,25 @@ sequenceDiagram
 | Miscounted pipeline | Counts and dates come from SOQL aggregates, never model arithmetic |
 | Paraphrased manufacturing note | `Customer Need` read back verbatim; the diff carries the exact string |
 | Misheard amount or date | `preview_opportunity_update` returns a diff the agent reads back |
+| **Agent skipping the read-back** | The write refuses without an HMAC token the preview issued over those exact values |
+| **A "yes" the rep never meant** | The token proves a preview happened, not that consent was given — `undo_last_write` is what closes this |
+| **"Undo" heard twice unwinding the day** | An undone row is flagged, and undo refuses it rather than reaching for the one before |
+| **Undo reversing another rep's change** | Scoped to a named record, which the agent has because it just wrote to it |
 | Replayed command compounding a value | Write tools accept absolute values only — never deltas |
 | Duplicate task from repeated speech | Upsert on a **Unique External ID** field — enforced by Salesforce |
 | Duplicate Chatter post | Write ledger upsert gates the post — `FeedItem` can't hold a custom field |
 | **@mention that notifies nobody** | Name resolved to a User ID; ambiguous or unresolved is asked aloud, never guessed |
+| **Wrong customer with a similar name** | `search_accounts` returns a resolution, so several matches cannot be read as a pick |
 | Invalid stage name rejected by the API | Spoken stage resolved against cached `describe` picklist values |
 | Spoken input reaching the query engine | SOSL with escaped reserved characters; IDs regex-validated |
 | Background speech triggering a write | Confirmation phrase required; VAD tuned with deep noise suppression |
+| Record ID read aloud as digits | The agent never speaks IDs or URLs; a link appears on the rep's screen instead |
 | Accidental destructive edit | No delete tools exist in the surface at all |
+| Change of unknown origin in the CRM | Every write leaves a `Source__c`-stamped ledger row |
 
 ### Provider layer
 
-One registry is the single source of truth. REST routes, the OpenAPI document, and the MCP tool list are all generated from it — they cannot drift.
+One registry is the single source of truth. REST routes and the OpenAPI document are both generated from it, so they cannot drift — and any future surface, MCP included, generates from the same declaration.
 
 ```mermaid
 graph LR
@@ -293,7 +320,6 @@ graph LR
     subgraph Surfaces["Generated surfaces"]
         REST["FastAPI routes"]
         SPEC["openapi/crm-tools.json"]
-        MCPS["MCP server"]
     end
 
     REG --> HAND
@@ -302,14 +328,13 @@ graph LR
     PROV -.implements.-> FAKE
     REG --> REST
     REG --> SPEC
-    REG --> MCPS
     SPEC -->|"registered as<br/>OpenAPI tool"| AGENT["Foundry Agent"]
 
     classDef core fill:#107C10,stroke:#0B5A0B,color:#fff
     classDef gen fill:#0078D4,stroke:#004578,color:#fff
     classDef prim fill:#00A1E0,stroke:#0071A8,color:#fff
     class REG,HAND,PROV core
-    class REST,SPEC,MCPS gen
+    class REST,SPEC gen
     class SFDC prim
 ```
 
@@ -380,7 +405,7 @@ Salesforce credentials never leave the tool API. The agent holds no Salesforce i
 
 ### Metadata bundle
 
-`sf project deploy start --source-dir sfdx/force-app` creates **one custom object, eight custom
+`sf project deploy start --source-dir sfdx/force-app` creates **one custom object, ten custom
 fields, and one permission set**. Nothing else — no data, no users, no layout changes, no profile
 edits.
 
@@ -389,12 +414,15 @@ edits.
 | `Idempotency_Key__c` | `Activity` | Text(64) · External ID · Unique | Lets task creation be an upsert, so a repeated voice command can't create a second record. Defined once on `Activity`; surfaces on both `Task` and `Event` |
 | `Customer_Need__c` | `Opportunity` | LongTextArea(32768) | The manufacturing note, written verbatim |
 | `Comments__c` | `Opportunity` | LongTextArea(32768) | Dictated meeting notes |
-| `Voice_Write_Log__c` | — | Custom object | Idempotency ledger for records that can't carry their own key |
+| `Voice_Write_Log__c` | — | Custom object | The write ledger: idempotency, provenance and undo in one row |
 | `Idempotency_Key__c` | `Voice_Write_Log__c` | Text(64) · External ID · Unique · required | The ledger key itself |
 | `Operation__c` | `Voice_Write_Log__c` | Text(64) | Which tool issued the write |
 | `Target_Record_Id__c` | `Voice_Write_Log__c` | Text(18) | Record the write targeted |
 | `Result_Record_Id__c` | `Voice_Write_Log__c` | Text(18) | Record the write produced, so a replay can report it |
-| `CRM_Companion_Integration` | — | Permission set | Grants FLS on the above and object access on the ledger |
+| `Source__c` | `Voice_Write_Log__c` | Text(80) | Which system produced the write — `CRM Sales Companion` |
+| `Previous_Values__c` | `Voice_Write_Log__c` | LongTextArea(32768) | The fields this write changed, pre-write, as JSON. What undo restores |
+| `Undone__c` | `Voice_Write_Log__c` | Checkbox | Set when reversed. Undo refuses an already-undone row rather than reaching further back |
+| `CRM_Companion_Integration` | — | Permission set | Grants FLS on the above, object access on the ledger, and `Delete` on `Task` so a task created by mistake can be undone |
 
 > **`Task` and `Event` do not take custom fields directly.** They share the `Activity` object,
 > which is where the field is defined. Targeting `Task` or `Event` fails the deploy with
@@ -570,6 +598,27 @@ The response body reports which happened, so no HTTP status inspection is needed
 
 **Updates need none of this.** Setting `CloseDate = 2026-10-15` twice leaves the same state, so `Opportunity` needs no External ID field. That property only holds because write tools accept **absolute values and never deltas** — the reason that rule is enforced in the tool contract rather than left to the prompt.
 
+### Provenance and undo
+
+The ledger started as a dedupe gate for Chatter. Every write now leaves a row there, because provenance and undo want the same record: one says the change came from the companion, the other needs the values it replaced. Two stores would have had to be kept in step for no gain.
+
+```
+Operation__c            Source__c              Undone__c  Previous_Values__c
+undo                    CRM Sales Companion    false
+update_opportunity      CRM Sales Companion    true       {"amount":"42000.0"}
+post_chatter_update                            false
+```
+
+That blank `Source__c` is a real row from an earlier deployment — provenance visibly separating tagged writes from untagged ones.
+
+**Record-level attribution cannot carry this on its own.** `LastModifiedById` names the integration user today, and will name the rep once writes are attributed per person. Neither says the change arrived by voice, which is what you want to know when a value looks wrong.
+
+**A lost audit row must not fail a write that already landed.** Ledger failures are logged, not raised. Raising would give the worst outcome available: the change is in the CRM, the rep is told it failed, and they say it again.
+
+**Undo is scoped to a record.** It first shipped taking no arguments, on the reasoning that a driving rep should not have to name one. In live testing it reversed a change to a different opportunity, from a different session, made minutes earlier by the test suite. The mechanism was right and the scope was wrong — `undo_last_write` now takes the record ID the agent just wrote to, and refuses to guess when it does not have one.
+
+**Reversals are flagged, not deleted.** An undone row keeps its history and is excluded from being undone again; reversals are logged as `undo` and are never candidates themselves. So "undo, undo, undo" over road noise reverses exactly one change. A create is reversed by deleting the record and clearing the replay key, so saying the same command again creates a real record rather than reporting a replay of something that no longer exists.
+
 ### Picklist resolution
 
 `Opportunity.StageName` is a picklist whose values are org-specific. A stock org ships:
@@ -621,19 +670,18 @@ graph TB
             FRES["AI Services resource<br/>Voice Live enabled region"]
             PROJ["Foundry project"]
             AGT["Prompt Agent<br/>CRM Sales Companion<br/>+ Voice Live config in metadata"]
-            MDL["Model deployment<br/>gpt-realtime"]
+            MDL["Model deployment<br/>gpt-4.1-mini"]
             CONN["Custom keys connection<br/>tool API credential"]
         end
 
-        subgraph COMPUTE["Container Apps environment"]
-            CAPP["ca-crm-tools<br/>FastAPI · external ingress · HTTPS"]
-            CMCP["ca-mcp-server<br/>later"]
+        subgraph COMPUTE["Container Apps environment — VNet integrated"]
+            CAPP["ca-crm-tools<br/>FastAPI · browser relay<br/>external ingress · HTTPS"]
         end
 
         subgraph SUPPORT["Platform services"]
             ACR["Azure Container Registry"]
             UAMI["User-assigned managed identity"]
-            KVLT["Key Vault<br/>Salesforce JWT private key"]
+            KVLT["Key Vault · private endpoint<br/>Salesforce JWT private key"]
             LAW["Log Analytics workspace"]
             APPI["Application Insights"]
         end
@@ -642,6 +690,7 @@ graph TB
     SFDC["Salesforce<br/>Developer Edition org"]
 
     DEV -->|"WSS 443<br/>Entra token"| FRES
+    DEV -->|"WSS 443 · browser client<br/>relayed, no Entra token held"| CAPP
     FRES --> PROJ
     PROJ --> AGT
     AGT --> MDL
@@ -652,7 +701,6 @@ graph TB
     UAMI -->|"get secret"| KVLT
     CAPP -->|"REST · JWT bearer"| SFDC
     CAPP --> APPI
-    CMCP --> APPI
     APPI --> LAW
     CAPP -.->|"container image"| ACR
 
@@ -661,7 +709,7 @@ graph TB
     classDef platform fill:#5C2D91,stroke:#3B1D5E,color:#fff
     classDef ext fill:#00A1E0,stroke:#0071A8,color:#fff
     class FRES,PROJ,AGT,MDL,CONN foundry
-    class CAPP,CMCP compute
+    class CAPP compute
     class ACR,UAMI,KVLT,LAW,APPI platform
     class SFDC ext
 ```
@@ -671,15 +719,17 @@ graph TB
 | Resource | Purpose | Provisioned by |
 |---|---|---|
 | Microsoft Foundry AI Services + project | Hosts Voice Live and the agent | **Existing** — referenced as a parameter |
-| Model deployment (`gpt-realtime`) | Agent reasoning + native audio | Existing |
+| Model deployment (`gpt-4.1-mini`) | Agent reasoning. **Not a realtime model** — agent mode runs the agent through the Responses API, which rejects them | Existing |
+| Model deployment (`gpt-realtime`) | Speech, supplied by Voice Live itself | Existing |
 | Prompt Agent | Instructions, Voice Live session config, OpenAPI tool binding | `agent/provision.py` |
 | Salesforce Developer Edition org | System of record | **Existing** — Connected App added during setup |
-| Container Apps environment | Runtime for tool API and MCP server | Bicep |
-| Container App — CRM Tool API | Executes CRM tools; called by Foundry, calls Salesforce | Bicep + `azd deploy` |
+| Virtual network | Private path from the container app to Key Vault | Bicep |
+| Container Apps environment | VNet-integrated runtime for the tool API | Bicep |
+| Container App — CRM Tool API | Executes CRM tools, relays browser audio to Voice Live | Bicep + `az acr build` |
 | Azure Container Registry | Container images | Bicep |
-| User-assigned managed identity | ACR pull, Key Vault access | Bicep |
-| Key Vault | Salesforce JWT signing key | Bicep |
-| Log Analytics + Application Insights | Traces, tool latency, Salesforce API call counts | Bicep |
+| User-assigned managed identity | ACR pull, Key Vault access, Voice Live token | Bicep |
+| Key Vault (private endpoint only) | Salesforce JWT signing key | Bicep |
+| Log Analytics + Application Insights | Provisioned; **nothing sends to it yet** | Bicep |
 
 ### Identity and authentication
 
@@ -724,7 +774,7 @@ The tradeoff we accepted: Foundry has to reach the tool API, so even local devel
 
 The MCP tool's `require_approval` defaults to `always`, and that approval handshake is submitted through the runs API — which a Voice Live session does not surface. An MCP write tool would therefore hang forever in a voice conversation.
 
-So: **the voice path uses OpenAPI tools.** The MCP server ships as a Phase 2 deliverable exposing the same registry to other clients (IDE agents, chat surfaces), where the approval loop is both available and desirable.
+So: **the voice path uses OpenAPI tools.** An MCP server over the same registry stays designed but unbuilt — it would expose the identical tools to clients where the approval loop is both available and desirable (IDE agents, chat surfaces), which is worth doing once such a client exists.
 
 ### Salesforce REST directly, not the Salesforce DX MCP Server
 
@@ -742,11 +792,19 @@ The deeper mismatch survives even if those three are fixed. `run_soql_query` han
 
 **Where it genuinely fits: the developer inner loop.** Deploying metadata, running Apex tests, Code Analyzer, LWC scaffolding, querying an org while writing code — that is what its 60+ tools are built for, and it is good at it. It is developer tooling, not a runtime CRM data plane. Salesforce's own docs warn that enabling every toolset "can overwhelm the LLM context."
 
-This is not a bet against MCP. The convergence point is the other direction: `mcp/server.py` publishes *this* registry over MCP, so an MCP-standardised organisation gets the same sixteen voice-safe tools on the protocol it already uses. And because `CrmProvider` is a seam, a future Salesforce MCP server with transactional write tools and a service-principal auth model could be added as another implementation without touching the tool layer.
+This is not a bet against MCP. The convergence point is the other direction: an MCP server over *this* registry would give an MCP-standardised organisation the same seventeen voice-safe tools on the protocol it already uses. And because `CrmProvider` is a seam, a future Salesforce MCP server with transactional write tools and a service-principal auth model could be added as another implementation without touching the tool layer.
 
 ### Preview-then-commit instead of client-side confirmation
 
-Confirmation logic lives in the tool contract, not just the prompt. `preview_opportunity_update` is a real read-only endpoint returning a structured diff with the picklist already resolved. The agent is instructed to call it before any mutation. Prompt-only confirmation is one jailbreak away from a bad write; this is defense in depth.
+Confirmation logic lives in the tool contract, not just the prompt. `preview_opportunity_update` is a real read-only endpoint returning a structured diff with the picklist already resolved, and it issues an HMAC token over exactly those values. The write refuses anything else.
+
+The instruction to preview came first and was not enough. In a live run the agent skipped it on `Customer_Need__c` — the rep's phrasing sounded like a statement of fact rather than a request, which is exactly when a free-text manufacturing note arrives. Anything the prompt alone enforces is a behaviour, not a guarantee.
+
+### Undo instead of tighter confirmation
+
+The token proves a preview happened. It cannot prove the rep meant to say yes — after a read-back, a "yeah" aimed at a passenger produces a valid token and a real write. Tightening the confirmation wording only narrows that window.
+
+Undo closes it, and was nearly free: the preview already computes the before-state, so persisting it in the ledger turns "put that back" into a lookup and a reverse write. For a voice interface where mishearing is structural, recovery is worth more than any further amount of gating — which is also why undo itself takes no confirmation token. Gating the recovery path defeats it.
 
 ### Idempotency in the database, not the process
 
@@ -764,40 +822,45 @@ The fake still exists, but it is a recorded test double, not a parallel data mod
 
 ## Tool surface
 
+Seventeen tools, all generated from `tools/registry.py`.
+
 | Tool | Kind | Notes |
 |---|---|---|
-| `search_accounts` | read | SOSL name search, escaped. Entry point for "how many opps does X have" |
-| `get_account` | read | Account with related open opportunities |
-| `get_pipeline_summary` | read | **Aggregate** — open count, oldest `CreatedDate`, past-due count |
+| `search_accounts` | read | SOSL name search, escaped. Returns an `AccountResolution`, so several hits cannot be read as a pick |
+| `get_account` | read | Account detail by ID |
+| `get_pipeline_summary` | read | **Aggregate** — open count, past-due count, oldest `CreatedDate`, total open amount |
+| `list_open_opportunities` | read | Open opportunities for an account, soonest close date first |
 | `list_past_due_opportunities` | read | `IsClosed = false AND CloseDate < TODAY`, ordered for one-at-a-time reading |
-| `get_opportunity` | read | By ID, or open opportunities for an account |
-| `get_contact` | read | Contact detail by ID or account + name |
-| `list_tasks` | read | Upcoming tasks for the running user |
-| `resolve_user` | read | Name → User ID for Chatter mentions; ambiguity returned, never guessed |
-| `preview_opportunity_update` | **preview** | Read-only diff, picklists resolved, note text carried verbatim |
-| `update_opportunity` | **write** | Stage, close date, amount. Absolute values only |
-| `update_opportunity_notes` | **write** | `Comments__c` and `Customer_Need__c`. Verbatim, no summarisation |
-| `post_chatter_update` | **write** | Structured `messageSegments` with real mentions; ledger-gated |
+| `get_opportunity` | read | Opportunity detail by ID, including current notes |
+| `list_contacts` | read | Contacts at an account |
+| `get_contact` | read | Contact detail by ID |
+| `list_tasks` | read | Open tasks for the running user, soonest due first |
+| `resolve_user` | read | Name → User ID for Chatter mentions, filtered by licence; ambiguity returned, never guessed |
+| `resolve_stage` | read | Spoken shorthand → the org's real picklist value; ambiguity returned, never guessed |
+| `preview_opportunity_update` | **preview** | Read-only diff, picklists resolved, note text carried verbatim. Issues the confirmation token the writes require |
+| `update_opportunity` | **write** | Stage, close date, amount. Absolute values only, token required |
+| `update_opportunity_notes` | **write** | `Comments__c` and `Customer_Need__c`. Verbatim, no summarisation, token required |
 | `create_task` | **write** | Upsert on `Idempotency_Key__c` |
-| `create_activity` | **write** | Completed `Task` of `Type='Call'`, or `Event` for meetings |
-| `create_call_report` | **write** | Completed call Task carrying notes in `Description` |
-| `set_opportunity_product_details` | **write** | *Stretch* — finish, colour, area, trim length, prices |
+| `post_chatter_update` | **write** | Structured `messageSegments` with real mentions; ledger-gated |
+| `undo_last_write` | **write** | Reverses the last companion change to one named record, once |
 
 No delete operations exist, and no tool accepts a relative adjustment. A voice interface in a moving car is the wrong place for destructive verbs or arithmetic that compounds on replay.
+
+Designed but not built: `create_activity`, `create_call_report` and `set_opportunity_product_details` — the stretch capabilities in [Future enhancements](#future-enhancements).
 
 ---
 
 ## Repository layout
 
 ```
-azure.yaml                          azd service + hook definitions
+Dockerfile                          tool API + relay image
+azure.yaml                          azd service definition
 pyproject.toml                      dependencies, tooling, pytest config
-.env.example                        every required variable, documented
 infra/
   main.bicep                        subscription-scope entry point
+  resources.bicep                   VNet, ACR, UAMI, Key Vault (private endpoint),
+                                    VNet-integrated ACA env, container app, monitoring
   main.parameters.json
-  modules/                          ACA env, container app, ACR, UAMI,
-                                    Key Vault, monitoring
 sfdx-project.json                   sf CLI project root, points at sfdx/force-app
 sfdx/
   force-app/main/default/
@@ -806,61 +869,74 @@ sfdx/
       Opportunity/fields/
         Comments__c.field-meta.xml                       approximated
         Customer_Need__c.field-meta.xml                  approximated
-      Voice_Write_Log__c/                                ledger for FeedItem dedupe
+      Voice_Write_Log__c/                                write ledger
         Voice_Write_Log__c.object-meta.xml
         fields/Idempotency_Key__c.field-meta.xml         External ID + Unique
         fields/Operation__c.field-meta.xml
         fields/Target_Record_Id__c.field-meta.xml
         fields/Result_Record_Id__c.field-meta.xml
+        fields/Source__c.field-meta.xml                  provenance stamp
+        fields/Previous_Values__c.field-meta.xml         what undo restores
+        fields/Undone__c.field-meta.xml                  reversed, not deleted
     permissionsets/
       CRM_Companion_Integration.permissionset-meta.xml   FLS for the above
 src/crm_companion/
-  config.py                         pydantic-settings; fails fast on missing config
+  config.py                         pydantic-settings; each subsystem fails fast via require_*
   crm/
-    models.py                       pydantic domain models
-    provider.py                     CrmProvider Protocol — the seam
-    salesforce_provider.py          DEFAULT — REST, JWT, describe cache, upsert
+    models.py                       pydantic domain models, resolutions, write log
+    provider.py                     CrmProvider Protocol — the seam — + stage matching
+    factory.py                      provider_scope(): selects fake vs Salesforce
+    salesforce_provider.py          DEFAULT — reads, writes, ledger, undo
+    salesforce_client.py            REST transport, upsert, feed items, error mapping
     salesforce_auth.py              sf CLI token (local) / JWT bearer (deployed)
     salesforce_mapping.py           domain ↔ SObject field translation, config-driven
-    aggregates.py                   COUNT / MIN / past-due SOQL
-    chatter.py                      feed-elements, messageSegments, mention building
-    users.py                        name → User ID resolution + ambiguity
-    ledger.py                       Voice_Write_Log__c upsert gate
     soql.py                         SOSL/SOQL escaping + ID regex validation
     fake_provider.py                recorded responses; tests + prompt tuning
-    recordings/                     captured API responses, refreshed not authored
+    recording.py                    sanitises captured responses into the fixture
+  data/crm_fixture.json             the recorded fixture, committed
   tools/
-    registry.py                     single source of truth for all tools
-    handlers.py                     the ten handlers
+    registry.py                     single source of truth for all 17 tools
+    schemas.py                      tool inputs; record IDs validated at the boundary
+    handlers.py                     the handlers
+    confirmation.py                 HMAC write tokens — preview as a precondition
   api/
     app.py                          FastAPI; routes generated from registry
-    security.py                     API key → Entra JWT
-    openapi.py                      spec exporter
-  mcp/
-    server.py                       MCP streamable-HTTP over the same registry
+    security.py                     API key guard
+    openapi.py                      spec builder
+    realtime.py                     browser ↔ Voice Live WebSocket relay
+    links.py                        record links pushed to connected browsers
+    static/                         browser client — chat + mic toggle
   agent/
-    instructions.py                 driving-optimized prompt + confirmation policy
+    instructions.py                 driving-optimized prompt + write/undo policy
     voicelive_config.py             session config + 512-char metadata chunking
     provision.py                    create/update agent version
     smoketest.py                    text-mode agent test — no audio
   voice/
     audio.py                        PyAudio capture/playback, barge-in queue
     session.py                      shared Voice Live event loop
-    cli.py                          agent-mode CLI entry point
+    cli.py                          agent-mode CLI entry point (crm-voice)
 openapi/crm-tools.json              generated artifact, committed
 scripts/
-  seed_org.py                       creates the demo Account + Opportunity
+  seed_org.py                       creates the demo Account + Opportunities
   record_fixtures.py                captures live responses for the fake
+  export_openapi.py                 writes openapi/crm-tools.json
+  create_tool_connection.py         Foundry connection holding the tool API key
+  deploy_connected_app.sh           Connected App via metadata deploy
   new_jwt_cert.sh                   self-signed cert for the Connected App
-tests/                              handler, idempotency, escaping, spec validity
-docs/                               deep-dive architecture notes
+tests/                              tools, API, agent, provision, voice, provider,
+                                    fixtures, and the opt-in live-org suite
+docs/development-log.md             build log and findings
 ```
+
+Four modules named in earlier drafts were never created: `aggregates.py`, `chatter.py`, `users.py` and `ledger.py` each came to 15–20 lines, and splitting them would have added indirection without separation — they stayed in `salesforce_provider.py`. `mcp/server.py` is [parked](#openapi-tools-for-the-voice-path-mcp-as-a-parallel-surface).
 
 ---
 
 ## Implementation plan
 
-### Phase 1 — Org access and preparation
+Phases 1–7 are complete and verified against the live org and the deployed environment. Phase 8 is deliberately parked — see [below](#phase-8--mcp-and-docs).
+
+### Phase 1 — Org access and preparation ✅
 *Nothing else can be verified until the API answers.*
 
 1. Install the Salesforce CLI, `sf org login web`, confirm API access with a raw REST call
@@ -870,47 +946,48 @@ docs/                               deep-dive architecture notes
 5. Run `scripts/seed_org.py` — a demo account with ~14 open opportunities, 6 deliberately past due, spread across stages and entry dates
 6. Verify the JWT bearer flow independently of the app
 
-### Phase 2 — Domain and provider
+### Phase 2 — Domain and provider ✅
 
 7. pydantic domain models and the `CrmProvider` Protocol
 8. `salesforce_auth.py` — sf CLI token locally, JWT bearer deployed, with token caching
 9. `soql.py` — escaping and ID regex validation with tests over the full reserved-character set, **before** any query is built
-10. `salesforce_provider.py` — reads, describe cache, stage resolution, upsert-by-External-ID
-11. `aggregates.py`, `users.py`, `chatter.py`, `ledger.py`
-12. `record_fixtures.py` → `fake_provider.py` seeded from real captured responses
+10. `salesforce_provider.py` — reads, describe cache, stage resolution, upsert-by-External-ID, aggregates, mentions, ledger
+11. `record_fixtures.py` → `fake_provider.py` seeded from real captured responses, sanitised
 
-### Phase 3 — Tool core
+### Phase 3 — Tool core ✅
 
-13. `tools/registry.py` — the keystone every other surface generates from
-14. The handlers, including `get_pipeline_summary`, `preview_opportunity_update`, `post_chatter_update`
-15. pytest against the fake: aggregates, idempotency replay, ledger gating, mention resolution, stage resolution, escaping
+12. `tools/registry.py` — the keystone every other surface generates from
+13. The handlers, including `get_pipeline_summary`, `preview_opportunity_update`, `post_chatter_update`, `undo_last_write`
+14. `confirmation.py` — HMAC tokens making preview a precondition rather than an instruction
+15. pytest against the fake: aggregates, idempotency replay, ledger gating, mention resolution, stage resolution, escaping, token forgery, undo scope
 
-### Phase 4 — Tool API and OpenAPI spec
+### Phase 4 — Tool API and OpenAPI spec ✅
 
-14. FastAPI routes generated from the registry, explicit `operationId` per tool
-15. API-key validation; anonymous auth is off the table for endpoints that mutate a real CRM
-16. OpenAPI 3.1 export with populated `servers[]`, validated in CI
+16. FastAPI routes generated from the registry, explicit `operationId` per tool
+17. API-key validation as a security scheme, not a header parameter — a credential the model can supply is one it can invent
+18. OpenAPI 3.1 export with populated `servers[]`, validated in the test suite
 
-### Phase 5 — Foundry agent
+### Phase 5 — Foundry agent ✅
 
-17. Instructions: driving-optimized, preview-before-write, absolute values, stage resolution
-18. Voice Live session config plus 512-char metadata chunk/reassemble helpers
-19. `provision.py` — create/update the agent version with the OpenAPI tool attached
-20. `smoketest.py` — **text-mode** test proving tool calling before audio enters the picture
+19. Instructions: driving-optimized, preview-before-write, absolute values, ambiguity, undo
+20. Voice Live session config plus 512-char metadata chunk/reassemble helpers
+21. `provision.py` — create/update the agent version with the OpenAPI tool attached
+22. `smoketest.py` — **text-mode** test proving tool calling before audio enters the picture
 
-### Phase 6 — Voice CLI
+### Phase 6 — Voice clients ✅
 
-21. 24 kHz PCM16 mono audio, 50 ms chunks, sequence-numbered playback for barge-in
-22. Agent-mode connect, proactive greeting, barge-in, dual logging
+23. 24 kHz PCM16 mono audio, 50 ms chunks, generation-numbered playback for barge-in
+24. Agent-mode connect, proactive greeting, barge-in, dual logging
+25. Browser client — Web Audio capture, WebSocket relay through the tool API, chat transcript with a mic toggle, record links pushed to screen
 
-### Phase 7 — Deploy
+### Phase 7 — Deploy ✅
 
-23. Bicep: ACR, Container Apps, managed identity, **Key Vault for the Salesforce key**, monitoring
-24. `azd up`, repoint `servers[0].url`, re-provision the agent
+26. Bicep: VNet, ACR, Container Apps, managed identity, **private-endpoint Key Vault for the Salesforce key**, monitoring
+27. Deploy, repoint `servers[0].url`, re-provision the agent
 
 ### Phase 8 — MCP and docs
 
-25. MCP server over the same registry, deep-dive docs, stretch-goal design notes
+28. MCP server over the same registry — **parked**. The voice path uses OpenAPI tools because MCP's approval handshake never surfaces in a Voice Live session, so this buys nothing until there is a second, non-voice client to serve.
 
 ---
 
@@ -1031,7 +1108,7 @@ SF_ORG_ALIAS=devorg                         # used by the sf CLI auth path
 # Foundry project
 PROJECT_ENDPOINT=https://<resource>.services.ai.azure.com/api/projects/<project>
 PROJECT_NAME=<project>
-MODEL_DEPLOYMENT_NAME=gpt-realtime
+MODEL_DEPLOYMENT_NAME=gpt-4.1-mini           # not a realtime model — see below
 
 # Voice Live
 VOICELIVE_ENDPOINT=https://<resource>.services.ai.azure.com/
@@ -1050,6 +1127,8 @@ TOOL_API_KEY=<generated>
 
 > **Version pinning.** Current docs show `2026-01-01-preview` for agent-mode connect and `2026-04-10` for model mode. Pin both against the installed `azure-ai-voicelive` and `azure-ai-projects` versions before writing session code rather than trusting the doc snippets. Same for the Salesforce REST version — read `/services/data` and pin it.
 
+> **The agent's model is not a realtime model.** In agent mode, Voice Live supplies speech itself and runs the agent through the Responses API, which rejects realtime deployments. Point `MODEL_DEPLOYMENT_NAME` at a text deployment. The failure mode is silent: the session returns `response.done` with zero tokens and the reason only in `status_details`.
+
 ---
 
 ## Local execution
@@ -1057,17 +1136,16 @@ TOOL_API_KEY=<generated>
 ```bash
 # 1. Install
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,api,azure,voice]"
 
 # 2. Tests — offline, no Azure or Salesforce needed
 pytest
 
-# 3. Confirm live Salesforce access
-python -m crm_companion.crm.salesforce_provider --check   # whoami + describe + API limits
+# 3. Confirm live Salesforce access (writes to the org; opt-in)
+pytest -m liveorg
 
-# 4. Generate and validate the OpenAPI spec
-python -m crm_companion.api.openapi
-openapi-spec-validator openapi/crm-tools.json
+# 4. Generate the OpenAPI spec
+python -m scripts.export_openapi
 
 # 5. Run the tool API against the dev org
 uvicorn crm_companion.api.app:app --reload --port 8000
@@ -1076,15 +1154,17 @@ uvicorn crm_companion.api.app:app --reload --port 8000
 devtunnel host -p 8000 --allow-anonymous
 # Copy the tunnel URL into TOOL_API_BASE_URL
 
-# 7. Provision the agent
+# 7. Register the key as a Foundry connection, then provision the agent
 az login
+python -m scripts.create_tool_connection
 python -m crm_companion.agent.provision
 
 # 8. Text-mode smoke test — verify tool calling before touching audio
 python -m crm_companion.agent.smoketest
+python -m crm_companion.agent.smoketest --prompt "How many open opportunities does <account> have?"
 
-# 9. Full voice conversation
-python -m crm_companion.voice.cli
+# 9. Full voice conversation — terminal, or the browser client at http://localhost:8000
+crm-voice
 ```
 
 Step 8 exists deliberately. Debugging tool invocation and audio plumbing simultaneously is miserable; proving the agent calls tools correctly over text first removes an entire class of confusion from step 9.
@@ -1097,21 +1177,27 @@ While iterating on agent instructions, set `CRM_PROVIDER=fake`. Prompt tuning ta
 
 ```bash
 azd auth login
-azd env new crm-companion-poc
+azd env new crm-tools
 
 # Point at the existing Foundry project
-azd env set AZURE_AI_PROJECT_ENDPOINT "<project endpoint>"
+azd env set PROJECT_ENDPOINT "<project endpoint>"
 azd env set AZURE_LOCATION "<voice-live-supported region>"
 
-azd up
+# Build the image, then provision (see note below on why not `azd deploy`)
+TAG="v$(date +%Y%m%d%H%M%S)"
+az acr build --registry <acr> --image "crm-tools:$TAG" --file Dockerfile .
+azd env set CONTAINER_IMAGE "<acr>.azurecr.io/crm-tools:$TAG"
+azd provision --no-prompt
 
 # Repoint the tool spec at the deployed API and re-register the agent
-azd env get-values | grep TOOL_API_BASE_URL
-python -m crm_companion.api.openapi
+azd env get-value TOOL_API_BASE_URL
+python -m scripts.export_openapi
 python -m crm_companion.agent.provision
 ```
 
-`azd up` provisions the Container Apps environment, registry, managed identity, and monitoring, then builds and deploys the tool API. The Foundry project is referenced, never created — the plan assumes you already own it.
+`azd provision` creates the VNet, Container Apps environment, registry, managed identity, private-endpoint Key Vault, and monitoring. The Foundry project is referenced, never created — the plan assumes you already own it.
+
+> **Two deployment traps, both found the hard way.** `azd deploy`'s remote build fails here with `InvalidCorrelationRequestId`, so images are built with `az acr build` and passed in as a parameter. And never tag an image `:latest` — `az containerapp update` reports success and rolls nothing, because the image reference is unchanged. Always use a unique tag and confirm the new revision is `Running` with `trafficWeight: 100` before testing.
 
 ---
 
@@ -1119,50 +1205,67 @@ python -m crm_companion.agent.provision
 
 | # | Check | Command |
 |---|---|---|
-| 1 | Aggregates, idempotency replay, ledger gating, mention resolution, escaping | `pytest` |
-| 2 | Assumptions only a real org can confirm | `pytest -m liveorg` |
-| 3 | Live org reachable; JWT flow works; metadata deployed | `python -m crm_companion.crm.salesforce_provider --check` |
-| 4 | OpenAPI spec is valid 3.1 with populated `servers[]` | `python -m crm_companion.api.openapi && openapi-spec-validator openapi/crm-tools.json` |
-| 5 | Every operation responds against the dev org | `uvicorn ...` + curl each `operationId` |
-| 6 | Agent invokes tools correctly | `python -m crm_companion.agent.smoketest` |
-| 7 | Full spoken loop | `python -m crm_companion.voice.cli` |
-| 8 | Deployed path | `azd up` → re-provision → repeat 7 |
+| 1 | Handlers, tokens, undo scope, idempotency, escaping, spec validity | `pytest` — 290 tests, ~4s, no credentials |
+| 2 | Assumptions only a real org can confirm | `pytest -m liveorg` — 20 tests, ~90s |
+| 3 | OpenAPI spec regenerates and matches the registry | `python -m scripts.export_openapi` |
+| 4 | Agent invokes tools correctly, no audio | `python -m crm_companion.agent.smoketest` |
+| 5 | Full spoken loop | `crm-voice`, or the browser client |
+| 6 | Deployed path | `azd provision` → re-provision the agent → repeat 5 |
 
-The offline suite needs no credentials and runs in about a second. `pytest -m liveorg` is
+The offline suite needs no credentials and runs in about four seconds. `pytest -m liveorg` is
 opt-in because it spends API quota and writes to the org; it covers the things mocks
 cannot — that fields are actually readable, that `Bidding` really is an Open stage, that
-Salesforce genuinely dedupes an upsert, and that a Chatter mention survives as a
-structured segment rather than becoming plain text.
+Salesforce genuinely dedupes an upsert, that a Chatter mention survives as a
+structured segment rather than becoming plain text, that one spoken account name can mean
+three different customers, and that a misheard note can be put back.
 
-**Acceptance script for check 6** — speak both scenes end to end:
+**Acceptance script for check 5** — speak all three scenes end to end:
 
 *Scene 1 — triage*
 1. "How many open opportunities does &lt;demo account&gt; have?" → counts match a manual SOQL run **exactly**
 2. "Read me the past due ones" → reads one, stops, waits
 3. "Next" → reads the second. Confirm it never dumps the whole list
+4. Ask about an account whose name several customers share → it reads the names back and asks which, rather than answering about one of them
 
 *Scene 2 — capture*
-4. "Update &lt;demo opportunity&gt;" → correct opportunity identified
-5. Dictate a Customer Need → agent reads it back **word for word**, not summarised
-6. "Yes" → verify in the Salesforce UI that `Customer_Need__c` matches the spoken text exactly
-7. "Push the close date to October 15th" → diff read back, confirmed, written
-8. Interrupt mid-sentence → playback stops immediately, agent yields
-9. "Post to Chatter, mention &lt;demo user&gt;" → confirm, post
-10. **Log in as that user and confirm the notification arrived** — a post containing the literal text `@Name` is a failure, not a pass
-11. Repeat step 9 verbatim → agent says it already posted, and the feed shows **exactly one** post
+5. "Update &lt;demo opportunity&gt;" → correct opportunity identified
+6. Dictate a Customer Need → agent reads it back **word for word**, not summarised
+7. "Yes" → verify in the Salesforce UI that `Customer_Need__c` matches the spoken text exactly
+8. "Push the close date to October 15th" → diff read back, confirmed, written
+9. Interrupt mid-sentence → playback stops immediately, agent yields
+10. "Post to Chatter, mention &lt;demo user&gt;" → confirm, post
+11. **Log in as that user and confirm the notification arrived** — a post containing the literal text `@Name` is a failure, not a pass
+12. Repeat step 10 verbatim → agent says it already posted, and the feed shows **exactly one** post
 
-Steps 6, 10 and 11 are the ones that get skipped, and each covers a failure that is invisible from the driver's seat: a paraphrased manufacturing note, a mention that notifies nobody, and a duplicate post. All three are verifiable in the org rather than by trusting the agent's own account of itself.
+*Scene 3 — recovery*
+13. Set an amount to an obviously wrong value and confirm it → a record link appears on screen and the agent never speaks the ID
+14. "No, that's wrong. Undo that." → the agent states the restored value from the tool, and the org shows the original
+15. Say "undo" again → it reports there is nothing to undo, and the change before it is **still intact**
+16. Query `Voice_Write_Log__c` → every change above appears, stamped `Source__c = CRM Sales Companion`
+
+Steps 7, 11, 12 and 15 are the ones that get skipped, and each covers a failure that is invisible from the driver's seat: a paraphrased manufacturing note, a mention that notifies nobody, a duplicate post, and an undo that quietly unwinds more than the rep asked for. All four are verifiable in the org rather than by trusting the agent's own account of itself.
 
 ---
 
 ## Future enhancements
 
+### Known gaps
+
+Things that are wrong or missing today, in the order they would matter in a pilot.
+
+- **Telemetry is provisioned but collects nothing.** `APPLICATIONINSIGHTS_CONNECTION_STRING` is injected into the container and nothing calls `configure_azure_monitor`. That matters more here than in a normal service: when the agent does something strange in a car, the rep can't screenshot it and won't remember the wording. Without tool-call spans and token issue/verify pairs there is nothing to reconstruct from.
+- **Every write is attributed to the integration user.** Salesforce's audit trail says the integration user changed that opportunity, not the rep. The `Source__c` stamp says it came from the companion, but not from whom. The JWT bearer flow already names a subject, so per-rep attribution is a session-scoped username rather than a redesign.
+- **Turn latency is unmeasured end to end.** The tool API is 145 ms warm for a pipeline summary and ~550 ms for `search_accounts` — but `silence_duration_ms = 700` is a guess, and it is additive on every single turn. Past about two seconds of silence a voice agent feels broken, and we do not currently know which side of that line we are on. Measure before tuning.
+- **VAD is untuned against real road noise.** Deep noise suppression and semantic VAD are configured, never validated in a moving vehicle.
+- **Record links broadcast to every session.** Correct for one rep with one tab, wrong for concurrent users — correlating a tool call back to a session needs an identifier Foundry does not pass through. Documented in `api/links.py`.
+- **The browser holds the master API key.** In memory only, never persisted, but it is the same full-write key the Foundry connection uses. It should be a short-lived scoped session token minted after a real sign-in.
+- **`/docs` and `/openapi.json` are publicly reachable** on the deployed app.
+
 ### Near term
 
-- **Browser voice client.** Web Audio capture → WebSocket relay in Container Apps → Voice Live. Phone-friendly, no local audio dependencies, and the natural demo vehicle for a rep in a vehicle.
 - **Managed identity for the tool API.** Replace the API-key connection with Foundry managed identity plus Entra JWT validation at the Container App.
 - **Conversation resume.** Thread `conversation_id` through reconnects so a dropped cellular connection resumes mid-thought instead of starting over.
-- **Per-rep record ownership.** Today one integration user owns every write. Real deployment needs the rep's own Salesforce identity so `OwnerId` and `CreatedById` reflect who actually spoke.
+- **Undo beyond the last change.** Today one change per record, once. A short spoken history — "what did I change on this one?" — falls out of the ledger almost for free.
 
 ### Stretch capabilities
 
@@ -1172,11 +1275,13 @@ Steps 6, 10 and 11 are the ones that get skipped, and each covers a failure that
 | Post-meeting capture | "Record today's notes" | Extended dictation → `create_call_report` + `create_activity` |
 | Forecast coaching | "What should I focus on this week?" | Pipeline query ranked by stage, amount, and staleness |
 | Generated follow-ups | Automatic after a call report | Draft task, activity, and follow-up email for review |
+| Product detail capture | "Cedar texture, slate gray, 1200 square feet" | `set_opportunity_product_details` — fields designed, not yet authored |
 
 ### Platform
 
 - **Multi-rep identity.** Per-rep Entra identity federated to Salesforce, so the assistant acts *as* the rep rather than as a shared integration user.
 - **Evaluation suite.** Batch evals over recorded conversations for tool-selection accuracy and confirmation compliance — the two behaviors that must not regress.
+- **MCP surface.** The registry is ready; it needs a non-voice client to justify it.
 - **Custom voice.** A brand-aligned voice via Azure custom neural voice (requires eligibility approval).
 - **Telephony.** The same agent behind a phone number for reps without the app.
 - **Production org hardening.** Field-level security review, a dedicated integration profile with least-privilege object permissions, and API call budgeting against the production org's limits.

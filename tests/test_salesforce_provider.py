@@ -31,6 +31,25 @@ ACCOUNT_ID = "001A000001abcDE"
 OPP_ID = "006A000001abcDE"
 USER_ID = "005A000001abcDE"
 
+LEDGER_UPSERT = "Voice_Write_Log__c/Idempotency_Key__c"
+
+OPPORTUNITY_ROW = {
+    "Id": OPP_ID,
+    "AccountId": ACCOUNT_ID,
+    "Name": "Demo Opportunity 1",
+    "StageName": "Bidding",
+    "Amount": 42000,
+    "CloseDate": "2026-09-30",
+    "CreatedDate": "2026-01-05T12:00:00.000+0000",
+    "IsClosed": False,
+    "Comments__c": None,
+    "Customer_Need__c": None,
+}
+
+
+def records(*rows) -> httpx.Response:
+    return httpx.Response(200, json={"records": list(rows), "done": True})
+
 
 class StubTokens:
     async def get(self):
@@ -195,6 +214,11 @@ class TestWrites:
         captured = {}
 
         def handler(request):
+            url = str(request.url)
+            if "/query" in url:
+                return records(OPPORTUNITY_ROW)
+            if LEDGER_UPSERT in url:
+                return httpx.Response(201, json={"id": "a0L1", "created": True})
             captured.update(json.loads(request.content))
             return httpx.Response(204)
 
@@ -215,6 +239,11 @@ class TestWrites:
         captured = {}
 
         def handler(request):
+            url = str(request.url)
+            if "/query" in url:
+                return records(OPPORTUNITY_ROW)
+            if LEDGER_UPSERT in url:
+                return httpx.Response(201, json={"id": "a0L1", "created": True})
             captured.update(json.loads(request.content))
             return httpx.Response(204)
 
@@ -283,3 +312,159 @@ class TestChatterLedger:
         assert result.outcome is WriteOutcome.REPLAYED
         assert result.record_id == "0D51"  # reports the original post
         assert posted == []  # and never posted a second time
+
+    async def test_an_undone_post_is_posted_again_rather_than_replayed(self):
+        posted = []
+
+        def handler(request):
+            url = str(request.url)
+            if LEDGER_UPSERT in url:
+                return httpx.Response(200, json={"id": "a0L1", "created": False})
+            if "feed-elements" in url:
+                posted.append(url)
+                return httpx.Response(201, json={"id": "0D52"})
+            if "/query" in url:
+                return records({"Result_Record_Id__c": "0D51", "Undone__c": True})
+            return httpx.Response(204)
+
+        result = await make_provider(handler).post_chatter_update(
+            record_id=OPP_ID, text="Pricing sent.", idempotency_key="k1"
+        )
+        assert result.outcome is WriteOutcome.CREATED
+        assert len(posted) == 1
+
+
+class TestProvenance:
+    async def test_a_write_stamps_its_source_and_the_values_it_replaced(self):
+        ledger = {}
+
+        def handler(request):
+            url = str(request.url)
+            if "/query" in url:
+                return records(OPPORTUNITY_ROW)
+            if LEDGER_UPSERT in url:
+                ledger.update(json.loads(request.content))
+                return httpx.Response(201, json={"id": "a0L1", "created": True})
+            return httpx.Response(204)
+
+        await make_provider(handler).update_opportunity(OPP_ID, amount=Decimal("500000"))
+
+        assert ledger["Source__c"] == "CRM Sales Companion"
+        assert ledger["Operation__c"] == "update_opportunity"
+        assert json.loads(ledger["Previous_Values__c"]) == {"amount": "42000"}
+
+    async def test_a_rejected_ledger_row_does_not_fail_the_write(self):
+        """The change already landed; reporting failure would invite a second one."""
+
+        def handler(request):
+            url = str(request.url)
+            if "/query" in url:
+                return records(OPPORTUNITY_ROW)
+            if LEDGER_UPSERT in url:
+                return httpx.Response(
+                    400, json=[{"errorCode": "INVALID_FIELD", "message": "no such column"}]
+                )
+            return httpx.Response(204)
+
+        result = await make_provider(handler).update_opportunity(OPP_ID, amount=Decimal("500000"))
+
+        assert result.outcome is WriteOutcome.UPDATED
+
+
+class TestUndo:
+    async def test_nothing_logged_means_nothing_to_undo(self):
+        def handler(request):
+            return records()
+
+        result = await make_provider(handler).undo_last_write(OPP_ID)
+
+        assert result.undone is False
+        assert result.detail == "there is nothing to undo on that record"
+
+    async def test_an_already_undone_row_is_not_walked_past(self):
+        def handler(request):
+            return records(
+                {
+                    "Id": "a0L1",
+                    "Operation__c": "update_opportunity",
+                    "Target_Record_Id__c": OPP_ID,
+                    "Result_Record_Id__c": OPP_ID,
+                    "Previous_Values__c": '{"amount":"42000"}',
+                    "Undone__c": True,
+                }
+            )
+
+        result = await make_provider(handler).undo_last_write(OPP_ID)
+
+        assert result.undone is False
+        assert "already" in result.detail
+
+    async def test_the_previous_amount_is_written_back(self):
+        restored = {}
+
+        def handler(request):
+            url = str(request.url)
+            if "/query" in url and "Voice_Write_Log__c" in url:
+                return records(
+                    {
+                        "Id": "a0L1",
+                        "Operation__c": "update_opportunity",
+                        "Target_Record_Id__c": OPP_ID,
+                        "Result_Record_Id__c": OPP_ID,
+                        "Previous_Values__c": '{"amount":"42000"}',
+                        "Undone__c": False,
+                    }
+                )
+            if "/query" in url:
+                return records({**OPPORTUNITY_ROW, "Amount": 500000})
+            if LEDGER_UPSERT in url:
+                return httpx.Response(201, json={"id": "a0L2", "created": True})
+            if "/sobjects/Opportunity/" in url:
+                restored.update(json.loads(request.content))
+            return httpx.Response(204)
+
+        result = await make_provider(handler).undo_last_write(OPP_ID)
+
+        assert restored == {"Amount": 42000.0}
+        assert result.undone is True
+        change = result.restored[0]
+        assert (change.before, change.after) == ("500000", "42000")
+
+    async def test_the_query_is_scoped_to_the_named_record(self):
+        """An unscoped undo reversed another session's change during live testing."""
+        queries = []
+
+        def handler(request):
+            queries.append(str(request.url))
+            return records()
+
+        await make_provider(handler).undo_last_write(OPP_ID)
+
+        assert any(OPP_ID in url for url in queries)
+
+    async def test_a_task_created_by_mistake_is_deleted(self):
+        deleted = []
+
+        def handler(request):
+            url = str(request.url)
+            if "/query" in url:
+                return records(
+                    {
+                        "Id": "a0L1",
+                        "Operation__c": "create_task",
+                        "Target_Record_Id__c": OPP_ID,
+                        "Result_Record_Id__c": "00T1",
+                        "Previous_Values__c": None,
+                        "Undone__c": False,
+                    }
+                )
+            if LEDGER_UPSERT in url:
+                return httpx.Response(201, json={"id": "a0L2", "created": True})
+            if request.method == "DELETE":
+                deleted.append(url)
+            return httpx.Response(204)
+
+        result = await make_provider(handler).undo_last_write(OPP_ID)
+
+        assert result.undone is True
+        assert any("Task/00T1" in url for url in deleted)

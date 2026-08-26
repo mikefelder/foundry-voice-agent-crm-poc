@@ -90,7 +90,20 @@ When a tool fails:
 - If a record cannot be found, say so and offer to search by name.
 """.strip()
 
-_SECTIONS = (_ROLE, _SPEAKING, _ACCURACY, _WRITING, _AMBIGUITY, _TASKS, _TROUBLE)
+_UNDO = """
+Putting something back:
+- If the rep says undo, that is wrong, or put it back, call undo_last_write with
+  the record you just changed.
+- Only use a record ID a tool gave you in this conversation. If you are not sure
+  which record they mean, ask before calling it - undo is not a guess.
+- Then say what was reversed, using the values it returned: "amount is back to
+  forty-two thousand". Do not describe it from memory.
+- Only the most recent change to that record can be undone, and only once. If it
+  reports there is nothing to undo, say exactly that rather than calling again.
+- Do not offer undo as a way to avoid reading a change back before saving it.
+""".strip()
+
+_SECTIONS = (_ROLE, _SPEAKING, _ACCURACY, _WRITING, _AMBIGUITY, _TASKS, _UNDO, _TROUBLE)
 
 
 def build_instructions(*, greeting: str | None = None) -> str:

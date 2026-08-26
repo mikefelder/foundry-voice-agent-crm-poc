@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Undone__c</fullName>
+    <label>Undone</label>
+    <description>Set when this write has been reversed. Undo refuses an already-undone row rather than walking further back, so a repeated "undo" over road noise is inert.</description>
+    <defaultValue>false</defaultValue>
+    <externalId>false</externalId>
+    <trackTrending>false</trackTrending>
+    <type>Checkbox</type>
+</CustomField>

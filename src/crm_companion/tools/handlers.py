@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 from crm_companion.crm.models import (
+    FIELD_LABELS,
     Account,
     AccountResolution,
     Contact,
@@ -23,6 +24,7 @@ from crm_companion.crm.models import (
     PipelineSummary,
     StageResolution,
     TaskRecord,
+    UndoResult,
     UserResolution,
     WriteResult,
 )
@@ -43,6 +45,7 @@ from crm_companion.tools.schemas import (
     ResolveStageParams,
     ResolveUserParams,
     SearchAccountsParams,
+    UndoLastWriteParams,
     UpdateOpportunityNotesParams,
     UpdateOpportunityParams,
 )
@@ -62,6 +65,7 @@ __all__ = [
     "resolve_stage",
     "resolve_user",
     "search_accounts",
+    "undo_last_write",
     "update_opportunity",
     "update_opportunity_notes",
 ]
@@ -143,7 +147,10 @@ async def preview_opportunity_update(
         if resolution.is_unique and resolution.only != current.stage:
             changes.append(
                 FieldChange(
-                    field="stage", label="Stage", before=current.stage, after=resolution.only
+                    field="stage",
+                    label=FIELD_LABELS["stage"],
+                    before=current.stage,
+                    after=resolution.only,
                 )
             )
 
@@ -151,7 +158,7 @@ async def preview_opportunity_update(
         changes.append(
             FieldChange(
                 field="close_date",
-                label="Close Date",
+                label=FIELD_LABELS["close_date"],
                 before=current.close_date.isoformat() if current.close_date else None,
                 after=params.close_date.isoformat(),
             )
@@ -161,7 +168,7 @@ async def preview_opportunity_update(
         changes.append(
             FieldChange(
                 field="amount",
-                label="Amount",
+                label=FIELD_LABELS["amount"],
                 before=f"{current.amount:f}" if current.amount is not None else None,
                 after=f"{params.amount:f}",
             )
@@ -171,7 +178,7 @@ async def preview_opportunity_update(
         changes.append(
             FieldChange(
                 field="comments",
-                label="Comments",
+                label=FIELD_LABELS["comments"],
                 before=current.comments,
                 after=params.comments,
             )
@@ -181,7 +188,7 @@ async def preview_opportunity_update(
         changes.append(
             FieldChange(
                 field="customer_need",
-                label="Customer Need",
+                label=FIELD_LABELS["customer_need"],
                 before=current.customer_need,
                 after=params.customer_need,
             )
@@ -281,6 +288,11 @@ async def post_chatter_update(
         idempotency_key=_idempotency_key("post_chatter_update", params),
         mention_user_ids=params.mention_user_ids,
     )
+
+
+async def undo_last_write(provider: CrmProvider, params: UndoLastWriteParams) -> UndoResult:
+    """No confirmation token: undo is the recovery path, and gating it defeats it."""
+    return await provider.undo_last_write(params.record_id)
 
 
 async def _resolved_stage(provider: CrmProvider, spoken: str) -> str:

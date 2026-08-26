@@ -778,6 +778,53 @@
           }
         ]
       }
+    },
+    "/tools/undo_last_write": {
+      "post": {
+        "tags": [
+          "write"
+        ],
+        "summary": "undo last write",
+        "description": "Put back the last change made to one record - a misheard amount, a task created by mistake. Name the record you just changed. Only its most recent change, and only once, so 'undo' repeated over road noise cannot unwind more. Say what it reports back to the rep.",
+        "operationId": "undo_last_write",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UndoLastWriteParams"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UndoResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -1657,6 +1704,78 @@
           "subject"
         ],
         "title": "TaskRecord"
+      },
+      "UndoLastWriteParams": {
+        "properties": {
+          "record_id": {
+            "type": "string",
+            "title": "Record Id",
+            "description": "The record just changed. If the rep has not said which, ask before calling."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "record_id"
+        ],
+        "title": "UndoLastWriteParams",
+        "description": "Scoped to one record on purpose.\n\nAn unscoped \"last write\" is whatever the deployment wrote most recently,\nwhich in testing reversed a change to a different record from a different\nsession. The agent always knows the record it just wrote to, so it names it."
+      },
+      "UndoResult": {
+        "properties": {
+          "undone": {
+            "type": "boolean",
+            "title": "Undone"
+          },
+          "operation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation"
+          },
+          "record_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Record Id"
+          },
+          "restored": {
+            "items": {
+              "$ref": "#/components/schemas/FieldChange"
+            },
+            "type": "array",
+            "title": "Restored",
+            "default": []
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "undone"
+        ],
+        "title": "UndoResult",
+        "description": "Outcome of reversing the last companion write.\n\n``undone`` false is an ordinary answer, not an error: there may be nothing to\nundo, or the last change may already have been put back."
       },
       "UpdateOpportunityNotesParams": {
         "properties": {

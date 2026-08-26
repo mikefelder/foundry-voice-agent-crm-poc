@@ -465,12 +465,53 @@ credential the model can invent. `APIKeyHeader` moves it into `securitySchemes`,
 caller supplies it and the schema does not mention it at all. There is a test asserting it
 never reappears as a parameter.
 
+**The confirmation token proves a preview happened, not that consent was given.** It binds
+a write to values that were read back, which is why it stops the agent skipping the
+read-back. It cannot tell a deliberate "yes" from one aimed at a passenger. Tightening the
+confirmation wording only narrows that window; undo closes it, which is why undo mattered
+more than any further gating.
+
+**Provenance and undo want the same row.** The ledger already existed to dedupe Chatter
+posts. Making every write leave a row gave both at once: `Source__c` says the change came
+from the companion, and `Previous_Values__c` is what undo restores. Two stores would have
+had to be kept in step for no gain. Record-level attribution cannot carry provenance on its
+own - `LastModifiedById` names the integration user today and will name the rep once writes
+are attributed per person, and neither says the change arrived by voice.
+
+**A lost audit row must not fail a write that already landed.** `_log_write` catches and
+logs instead of raising. Raising would give the worst outcome available: the change is in
+the CRM, the rep is told it failed, and they say it again.
+
+**"The last write" is global unless you scope it.** Undo shipped taking no arguments, on
+the reasoning that a driving rep should not have to name a record. In live testing it
+reversed a change to a different opportunity, from a different session, made minutes
+earlier by the test suite. The mechanism was correct and the scope was wrong. It now takes
+the record ID - which the agent always has, because it just wrote to it - and refuses to
+guess when it does not.
+
+**Repeating "undo" must not walk backwards.** An undone row is flagged rather than deleted,
+and undo refuses an already-undone row instead of reaching for the one before it. Reversals
+are logged too and excluded from candidacy, so "undo, undo, undo" over road noise reverses
+exactly one change.
+
+**Two green tests were green for the wrong reason.** The fake provider generated record IDs
+that collided with recorded ones, so a created task silently replaced a seeded task and the
+counts came out right. Fixing the collision broke both tests, which is how it was found.
+
+**Absolute seeded counts test drift, not behaviour.** `past_due_count == 6` failed because
+demo runs had moved a close date, not because anything regressed. The assertion that earns
+its place is that the SOQL aggregate agrees with the records it counts - that is the actual
+guarantee behind never counting rows in Python.
+
 ---
 
 ## Next
 
-1. Salesforce Connected App and JWT, so the deployed API can run `CRM_PROVIDER=salesforce`
-2. Tune VAD thresholds against real car audio rather than a quiet room
+1. Tune VAD thresholds against real car audio rather than a quiet room
+2. Wire `configure_azure_monitor`: the App Insights connection string is injected into the
+   container but nothing sends to it, so a bad turn in a car leaves no trace
+3. Attribute writes to the rep rather than the integration user - the JWT bearer flow
+   already names a subject, so this is a per-session username rather than a redesign
 
 Outstanding questions are tracked in the README: real production field API names, whether
 `Bidding` is the correct product-detail trigger stage, and pinning the Voice Live

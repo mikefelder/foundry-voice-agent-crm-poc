@@ -23,6 +23,7 @@ from crm_companion.crm.models import (
     PipelineSummary,
     StageResolution,
     TaskRecord,
+    UndoResult,
     UserResolution,
     WriteResult,
 )
@@ -131,3 +132,14 @@ class CrmProvider(Protocol):
         mention_user_ids: tuple[str, ...] = (),
     ) -> WriteResult:
         """Posts with structured mention segments so mentioned users are notified."""
+
+    async def undo_last_write(self, record_id: str) -> UndoResult:
+        """Reverse the most recent companion write to one record.
+
+        Only the single most recent one, and only once. Implementations must make
+        a repeat inert rather than reaching further back, because "undo" said
+        twice over road noise must not walk backwards through the day's changes.
+
+        Scoped to a record because an unscoped "last write" is whatever the
+        deployment wrote most recently, which is not necessarily this rep's.
+        """

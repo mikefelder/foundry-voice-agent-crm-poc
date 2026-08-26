@@ -17,17 +17,46 @@ __all__ = [
     "Account",
     "AccountResolution",
     "Contact",
+    "FIELD_LABELS",
     "FieldChange",
     "Opportunity",
     "OpportunityDiff",
     "PipelineSummary",
     "StageResolution",
     "TaskRecord",
+    "UNDO_OPERATION",
+    "UndoResult",
     "UserRef",
     "UserResolution",
+    "WriteLogEntry",
     "WriteOutcome",
     "WriteResult",
+    "as_field_text",
 ]
+
+# Spoken labels for the fields a write can change, in one place so a preview and
+# an undo describe the same change with the same words.
+FIELD_LABELS: dict[str, str] = {
+    "stage": "Stage",
+    "close_date": "Close Date",
+    "amount": "Amount",
+    "comments": "Comments",
+    "customer_need": "Customer Need",
+}
+
+# Reversals are logged too, and are themselves never candidates for undo.
+UNDO_OPERATION = "undo"
+
+
+def as_field_text(value: object) -> str | None:
+    """Render a field value the way a log and a diff both store it."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return f"{value:f}"
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
 
 
 class _Model(BaseModel):
@@ -220,3 +249,38 @@ class WriteResult(_Model):
     @property
     def is_new(self) -> bool:
         return self.outcome is WriteOutcome.CREATED
+
+
+class WriteLogEntry(_Model):
+    """One companion write, recorded so the org can be asked what it did.
+
+    Provenance and undo want the same row: ``source`` says the change came from
+    here even once writes are attributed to the rep, and ``previous_values``
+    holds the fields this write changed in their pre-write form. Values are text
+    so an entry survives storage in any backend unchanged.
+    """
+
+    id: str
+    operation: str
+    source: str
+    target_record_id: str | None = None
+    result_record_id: str | None = None
+    previous_values: dict[str, str | None] = Field(default_factory=dict)
+    # The create's idempotency key, cleared on undo so the same command said
+    # again creates a real record instead of reporting a replay of a deleted one.
+    replay_key: str | None = None
+    undone: bool = False
+
+
+class UndoResult(_Model):
+    """Outcome of reversing the last companion write.
+
+    ``undone`` false is an ordinary answer, not an error: there may be nothing to
+    undo, or the last change may already have been put back.
+    """
+
+    undone: bool
+    operation: str | None = None
+    record_id: str | None = None
+    restored: tuple[FieldChange, ...] = ()
+    detail: str | None = None

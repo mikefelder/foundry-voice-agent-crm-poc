@@ -9,7 +9,22 @@
         <allowRead>true</allowRead>
         <allowCreate>true</allowCreate>
         <allowEdit>true</allowEdit>
+        <!-- Ledger rows are never deleted: an undone write still has to be
+             auditable, so undo flags the row rather than removing it. -->
         <allowDelete>false</allowDelete>
+        <viewAllRecords>false</viewAllRecords>
+        <modifyAllRecords>false</modifyAllRecords>
+    </objectPermissions>
+
+    <!-- Undoing a task created by mistake deletes it, which needs object-level
+         Delete. Chatter posts need no equivalent grant: the integration user
+         posted them and can always remove its own. -->
+    <objectPermissions>
+        <object>Task</object>
+        <allowRead>true</allowRead>
+        <allowCreate>true</allowCreate>
+        <allowEdit>true</allowEdit>
+        <allowDelete>true</allowDelete>
         <viewAllRecords>false</viewAllRecords>
         <modifyAllRecords>false</modifyAllRecords>
     </objectPermissions>
@@ -48,6 +63,21 @@
     </fieldPermissions>
     <fieldPermissions>
         <field>Voice_Write_Log__c.Result_Record_Id__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Voice_Write_Log__c.Source__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Voice_Write_Log__c.Previous_Values__c</field>
+        <readable>true</readable>
+        <editable>true</editable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <field>Voice_Write_Log__c.Undone__c</field>
         <readable>true</readable>
         <editable>true</editable>
     </fieldPermissions>
