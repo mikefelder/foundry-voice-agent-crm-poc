@@ -25,8 +25,9 @@ Companion to the [README](../README.md), which describes the target architecture
 | Tool registry and handlers | ✅ 16 tools, derived idempotency keys |
 | Tool API + OpenAPI spec | ✅ routes generated from the registry |
 | Foundry project + agent | ✅ provisioned, calling tools over Voice Live |
-| Tool API on Container Apps | ✅ deployed, key-authenticated, `CRM_PROVIDER=fake` |
+| Tool API on Container Apps | ✅ deployed, key-authenticated, **live Salesforce org** |
 | Voice CLI | ✅ audio in/out, barge-in, interim responses |
+| Connected App + JWT | ✅ deployed as metadata, key in Key Vault |
 
 ```
 pytest              256 passed,  16 deselected   (~4s, no credentials)
@@ -320,6 +321,23 @@ reverts the running app to that placeholder, which listens on port 80 and so nev
 a health probe on 8000. The revision sits in `Activating` forever and the logs blame a
 probe failure rather than the image. The image is now a `containerImage` parameter, so
 provisioning preserves whatever is deployed.
+
+### "New Connected App" is gone from the UI, but the metadata type is not
+
+Newer orgs offer only **New Lightning App** and **New External Client App** in App
+Manager. The documented Connected App walkthrough — enable OAuth, upload the certificate,
+pick scopes — has no button behind it any more.
+
+The `ConnectedApp` metadata type still deploys, which is the better route regardless:
+`scripts/deploy_connected_app.sh` renders the app from `.secrets/server.crt` at deploy
+time and pushes it, so the same command works against any org and nothing keypair-specific
+is committed. `isAdminApproved` plus `profileName` in the metadata replaces the two
+Setup steps (pre-authorize, then assign a profile) that are easy to miss — and missing
+them produces `user hasn't approved this consumer`, which sounds like a scope problem
+rather than a policy one.
+
+The consumer key comes back the same way. Retrieving the app returns `consumerKey` in
+`oauthConfig`, so it never has to be copied out of **Manage Consumer Details** by hand.
 
 ---
 
