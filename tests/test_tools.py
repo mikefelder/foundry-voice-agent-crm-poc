@@ -56,6 +56,24 @@ def provider() -> FakeCrmProvider:
     )
 
 
+@pytest.fixture
+def settings_for_tokens(monkeypatch):
+    """Tokens are signed with the API key, so tests need a deterministic one."""
+    from crm_companion.config import Settings
+    from crm_companion.tools import confirmation
+
+    monkeypatch.setattr(
+        confirmation,
+        "get_settings",
+        lambda: Settings(_env_file=None, tool_api_key="unit-test-signing-key"),
+    )
+
+
+async def _preview(provider, **kwargs):
+    tool = get_tool("preview_opportunity_update")
+    return await tool.handler(provider, tool.params(opportunity_id=OPP_ID, **kwargs))
+
+
 class TestRegistry:
     def test_names_are_unique(self):
         assert len(tool_names()) == len(TOOLS)
@@ -75,8 +93,13 @@ class TestRegistry:
 
 
 @pytest.mark.parametrize("tool", TOOLS, ids=lambda tool: tool.name)
-async def test_every_tool_runs_against_the_recorded_fixture(tool, provider):
-    params = tool.params.model_validate(SAMPLE_PARAMS[tool.name])
+async def test_every_tool_runs_against_the_recorded_fixture(tool, provider, settings_for_tokens):
+    sample = dict(SAMPLE_PARAMS[tool.name])
+    if "confirmation_token" in tool.params.model_fields:
+        skip = {"opportunity_id", "confirmation_token"}
+        preview = await _preview(provider, **{k: v for k, v in sample.items() if k not in skip})
+        sample["confirmation_token"] = preview.confirmation_tokens[tool.name]
+    params = tool.params.model_validate(sample)
     assert await tool.handler(provider, params) is not None
 
 
@@ -163,38 +186,124 @@ class TestWrites:
             "post_chatter_update",
         }
 
-    async def test_absolute_values_are_applied(self, provider):
+    async def test_absolute_values_are_applied(self, provider, settings_for_tokens):
+        preview = await _preview(provider, amount=Decimal("50000"), stage="proposal")
         tool = get_tool("update_opportunity")
         await tool.handler(
             provider,
-            tool.params(opportunity_id=OPP_ID, amount=Decimal("50000"), stage="proposal"),
+            tool.params(
+                opportunity_id=OPP_ID,
+                amount=Decimal("50000"),
+                stage="proposal",
+                confirmation_token=preview.confirmation_tokens["update_opportunity"],
+            ),
         )
 
         updated = await provider.get_opportunity(OPP_ID)
         assert updated.amount == Decimal("50000")
         assert updated.stage == "Proposal/Price Quote"
 
-    async def test_ambiguous_stage_is_refused_before_anything_is_written(self, provider):
+    async def test_writing_without_a_preview_is_refused(self, provider, settings_for_tokens):
+        """The agent skipped preview on notes in a live run; the API has to be the backstop."""
+        tool = get_tool("update_opportunity_notes")
+        with pytest.raises(ToolError, match="not previewed"):
+            await tool.handler(
+                provider,
+                tool.params(
+                    opportunity_id=OPP_ID,
+                    customer_need="slipped past the read-back",
+                    confirmation_token="0" * 64,
+                ),
+            )
+
+        assert (await provider.get_opportunity(OPP_ID)).customer_need is None
+
+    async def test_a_token_cannot_be_reused_for_different_values(
+        self, provider, settings_for_tokens
+    ):
+        preview = await _preview(provider, customer_need="slate gray, 1200 sq ft")
+        tool = get_tool("update_opportunity_notes")
+
+        with pytest.raises(ToolError, match="not previewed"):
+            await tool.handler(
+                provider,
+                tool.params(
+                    opportunity_id=OPP_ID,
+                    customer_need="something the rep never heard back",
+                    confirmation_token=preview.confirmation_tokens["update_opportunity_notes"],
+                ),
+            )
+
+    async def test_a_note_token_does_not_authorise_a_field_write(
+        self, provider, settings_for_tokens
+    ):
+        preview = await _preview(provider, customer_need="slate gray")
+        tool = get_tool("update_opportunity")
+
+        with pytest.raises(ToolError, match="not previewed"):
+            await tool.handler(
+                provider,
+                tool.params(
+                    opportunity_id=OPP_ID,
+                    amount=Decimal("1"),
+                    confirmation_token=preview.confirmation_tokens["update_opportunity_notes"],
+                ),
+            )
+
+    async def test_amount_scale_does_not_break_the_token(self, provider, settings_for_tokens):
+        # The agent may echo 50000 or 50000.0; both mean the previewed value.
+        preview = await _preview(provider, amount=Decimal("50000"))
+        tool = get_tool("update_opportunity")
+
+        result = await tool.handler(
+            provider,
+            tool.params(
+                opportunity_id=OPP_ID,
+                amount=Decimal("50000.00"),
+                confirmation_token=preview.confirmation_tokens["update_opportunity"],
+            ),
+        )
+        assert result.outcome is WriteOutcome.UPDATED
+
+    async def test_ambiguous_stage_is_refused_before_anything_is_written(
+        self, provider, settings_for_tokens
+    ):
         tool = get_tool("update_opportunity")
         with pytest.raises(ToolError, match="ask which one"):
             await tool.handler(
                 provider,
-                tool.params(opportunity_id=OPP_ID, stage="closed", amount=Decimal("1")),
+                tool.params(
+                    opportunity_id=OPP_ID,
+                    stage="closed",
+                    amount=Decimal("1"),
+                    confirmation_token="0" * 64,
+                ),
             )
 
         unchanged = await provider.get_opportunity(OPP_ID)
         assert unchanged.stage == "Bidding"
         assert unchanged.amount == Decimal("42000.0")
 
-    async def test_unknown_stage_is_refused(self, provider):
+    async def test_unknown_stage_is_refused(self, provider, settings_for_tokens):
         tool = get_tool("update_opportunity")
         with pytest.raises(ToolError, match="not a stage"):
-            await tool.handler(provider, tool.params(opportunity_id=OPP_ID, stage="banana"))
+            await tool.handler(
+                provider,
+                tool.params(opportunity_id=OPP_ID, stage="banana", confirmation_token="0" * 64),
+            )
 
-    async def test_notes_are_written_verbatim(self, provider):
+    async def test_notes_are_written_verbatim(self, provider, settings_for_tokens):
         spoken = 'Wide plank finish in slate gray, about 1,200 sq ft; "quoted".'
+        preview = await _preview(provider, customer_need=spoken)
         tool = get_tool("update_opportunity_notes")
-        await tool.handler(provider, tool.params(opportunity_id=OPP_ID, customer_need=spoken))
+        await tool.handler(
+            provider,
+            tool.params(
+                opportunity_id=OPP_ID,
+                customer_need=spoken,
+                confirmation_token=preview.confirmation_tokens["update_opportunity_notes"],
+            ),
+        )
 
         assert (await provider.get_opportunity(OPP_ID)).customer_need == spoken
 

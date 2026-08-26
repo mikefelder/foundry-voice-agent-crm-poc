@@ -554,7 +554,7 @@
           "read"
         ],
         "summary": "preview opportunity update",
-        "description": "Show exactly what a change would do, without writing. Call this before any opportunity write, read the diff back, and only then write. Note text must be read back word for word.",
+        "description": "Show exactly what a change would do, without writing. Call this before any opportunity write, read the diff back, and only then write. Note text must be read back word for word. Returns the token the write needs.",
         "operationId": "preview_opportunity_update",
         "requestBody": {
           "content": {
@@ -601,7 +601,7 @@
           "write"
         ],
         "summary": "update opportunity",
-        "description": "Write stage, close date or amount, each as the value it should become. Only after preview_opportunity_update and a spoken yes.",
+        "description": "Write stage, close date or amount, each as the value it should become. Requires the confirmation_token from preview_opportunity_update and a spoken yes.",
         "operationId": "update_opportunity",
         "requestBody": {
           "content": {
@@ -648,7 +648,7 @@
           "write"
         ],
         "summary": "update opportunity notes",
-        "description": "Write the comments and customer need fields. Read the text back word for word first - it is manufactured from, not summarised.",
+        "description": "Write the comments and customer need fields. Requires the confirmation_token from preview_opportunity_update. Read the text back word for word first - it is manufactured from, not summarised.",
         "operationId": "update_opportunity_notes",
         "requestBody": {
           "content": {
@@ -1263,6 +1263,14 @@
               }
             ],
             "description": "Present only when a stage was requested. When it is not unique the stage change is left out of the diff and must be asked aloud."
+          },
+          "confirmation_tokens": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Confirmation Tokens",
+            "description": "Tool name to token. Pass the matching token to that tool to write these exact values; any other values are refused."
           }
         },
         "additionalProperties": false,
@@ -1637,6 +1645,12 @@
             "type": "string",
             "title": "Opportunity Id"
           },
+          "confirmation_token": {
+            "type": "string",
+            "minLength": 16,
+            "title": "Confirmation Token",
+            "description": "From preview_opportunity_update, for exactly this text."
+          },
           "comments": {
             "anyOf": [
               {
@@ -1666,7 +1680,8 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "opportunity_id"
+          "opportunity_id",
+          "confirmation_token"
         ],
         "title": "UpdateOpportunityNotesParams"
       },
@@ -1675,6 +1690,12 @@
           "opportunity_id": {
             "type": "string",
             "title": "Opportunity Id"
+          },
+          "confirmation_token": {
+            "type": "string",
+            "minLength": 16,
+            "title": "Confirmation Token",
+            "description": "From preview_opportunity_update, for exactly these values."
           },
           "stage": {
             "anyOf": [
@@ -1721,7 +1742,8 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "opportunity_id"
+          "opportunity_id",
+          "confirmation_token"
         ],
         "title": "UpdateOpportunityParams",
         "description": "Absolute values only. There is deliberately no way to adjust a value by an amount."

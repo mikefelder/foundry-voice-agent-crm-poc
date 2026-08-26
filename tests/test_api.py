@@ -65,11 +65,30 @@ class TestRoutes:
         response = client.post(
             "/tools/update_opportunity",
             headers=HEADERS,
-            json={"opportunity_id": OPP_ID, "stage": "closed"},
+            json={
+                "opportunity_id": OPP_ID,
+                "stage": "closed",
+                # Rejected for ambiguity before the token is ever checked.
+                "confirmation_token": "0" * 64,
+            },
         )
 
         assert response.status_code == 409
         assert "ask which one" in response.json()["detail"]
+
+    def test_writing_without_a_preview_is_a_conflict(self, client):
+        response = client.post(
+            "/tools/update_opportunity_notes",
+            headers=HEADERS,
+            json={
+                "opportunity_id": OPP_ID,
+                "customer_need": "never read back",
+                "confirmation_token": "0" * 64,
+            },
+        )
+
+        assert response.status_code == 409
+        assert "not previewed" in response.json()["detail"]
 
     def test_invented_id_never_reaches_a_handler(self, client):
         response = client.post(

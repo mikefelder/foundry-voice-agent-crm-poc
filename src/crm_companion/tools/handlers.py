@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from crm_companion.crm.models import (
@@ -25,6 +27,7 @@ from crm_companion.crm.models import (
 )
 from crm_companion.crm.provider import CrmProvider
 from crm_companion.tools import RecordNotFound, ToolError
+from crm_companion.tools.confirmation import issue_token, require_token
 from crm_companion.tools.schemas import (
     CreateTaskParams,
     GetAccountParams,
@@ -181,6 +184,19 @@ async def preview_opportunity_update(
             )
         )
 
+    resolved_stage = resolution.only if resolution and resolution.is_unique else None
+    tokens: dict[str, str] = {}
+    if any(change.field in {"stage", "close_date", "amount"} for change in changes):
+        tokens["update_opportunity"] = issue_token(
+            "update_opportunity",
+            _field_values(current.id, resolved_stage, params.close_date, params.amount),
+        )
+    if any(change.field in {"comments", "customer_need"} for change in changes):
+        tokens["update_opportunity_notes"] = issue_token(
+            "update_opportunity_notes",
+            _note_values(current.id, params.comments, params.customer_need),
+        )
+
     return OpportunityPreview(
         diff=OpportunityDiff(
             opportunity_id=current.id,
@@ -188,11 +204,38 @@ async def preview_opportunity_update(
             changes=tuple(changes),
         ),
         stage=resolution,
+        confirmation_tokens=tokens,
     )
+
+
+def _field_values(
+    opportunity_id: str, stage: str | None, close_date: date | None, amount: Decimal | None
+) -> dict[str, Any]:
+    return {
+        "opportunity_id": opportunity_id,
+        "stage": stage,
+        "close_date": close_date,
+        "amount": amount,
+    }
+
+
+def _note_values(
+    opportunity_id: str, comments: str | None, customer_need: str | None
+) -> dict[str, Any]:
+    return {
+        "opportunity_id": opportunity_id,
+        "comments": comments,
+        "customer_need": customer_need,
+    }
 
 
 async def update_opportunity(provider: CrmProvider, params: UpdateOpportunityParams) -> WriteResult:
     stage = await _resolved_stage(provider, params.stage) if params.stage is not None else None
+    require_token(
+        params.confirmation_token,
+        "update_opportunity",
+        _field_values(params.opportunity_id, stage, params.close_date, params.amount),
+    )
     return await provider.update_opportunity(
         params.opportunity_id,
         stage=stage,
@@ -204,6 +247,11 @@ async def update_opportunity(provider: CrmProvider, params: UpdateOpportunityPar
 async def update_opportunity_notes(
     provider: CrmProvider, params: UpdateOpportunityNotesParams
 ) -> WriteResult:
+    require_token(
+        params.confirmation_token,
+        "update_opportunity_notes",
+        _note_values(params.opportunity_id, params.comments, params.customer_need),
+    )
     return await provider.update_opportunity_notes(
         params.opportunity_id,
         comments=params.comments,

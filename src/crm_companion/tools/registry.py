@@ -142,7 +142,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         description=(
             "Show exactly what a change would do, without writing. Call this before "
             "any opportunity write, read the diff back, and only then write. Note "
-            "text must be read back word for word."
+            "text must be read back word for word. Returns the token the write needs."
         ),
         params=schemas.PreviewOpportunityUpdateParams,
         result=schemas.OpportunityPreview,
@@ -152,7 +152,8 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="update_opportunity",
         description=(
             "Write stage, close date or amount, each as the value it should become. "
-            "Only after preview_opportunity_update and a spoken yes."
+            "Requires the confirmation_token from preview_opportunity_update and a "
+            "spoken yes."
         ),
         params=schemas.UpdateOpportunityParams,
         result=WriteResult,
@@ -162,8 +163,9 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="update_opportunity_notes",
         description=(
-            "Write the comments and customer need fields. Read the text back word "
-            "for word first - it is manufactured from, not summarised."
+            "Write the comments and customer need fields. Requires the "
+            "confirmation_token from preview_opportunity_update. Read the text back "
+            "word for word first - it is manufactured from, not summarised."
         ),
         params=schemas.UpdateOpportunityNotesParams,
         result=WriteResult,

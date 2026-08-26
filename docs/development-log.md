@@ -180,6 +180,58 @@ now means updating one connection, not cutting a new agent version.
 The count comes from `get_pipeline_summary`, not from the model counting records, and the
 list is read one item at a time on a cue — both design rules holding under a real call.
 
+### The agent skipped confirmation on the one field that matters most
+
+The first end-to-end Scene 2 run against the real org, verbatim:
+
+```
+> Customer need: they want the wide plank finish in slate gray, about 1200 sq ft.
+  Customer need updated: ...            <- past tense. Already written.
+
+> Yes, save it.
+  The customer need was already saved.
+```
+
+No preview, no read-back, no confirmation — on `Customer_Need__c`, the field supply chain
+manufactures from. In the same conversation the close date followed the protocol correctly
+("Change close date ... Save it?"), so this was not the model ignoring instructions
+wholesale. A phrase shaped like a statement of fact gets treated as one.
+
+This falsified a claim in the README: that confirmation "lives in the tool contract, not
+just the prompt" and is "defense in depth". It was not. `preview_opportunity_update` was
+advisory, and nothing stopped a write that skipped it. No jailbreak was needed — ordinary
+phrasing was enough.
+
+**The fix makes the claim true.** Preview now issues an HMAC token over exactly the values
+it previewed, signed with the tool API key; the write tools refuse anything else. The
+agent cannot mint one, because it only ever sees tool output. Verified against the
+deployed API:
+
+| Request | Result |
+|---|---|
+| Forged token | 409 refused |
+| Valid token, different text | 409 refused |
+| Valid token, matching text | 200 written |
+
+The middle row is the important one: previewing one thing and writing another is refused,
+so the token binds the confirmation to the exact words read back. It is stateless — no
+session store, and the binding is to values rather than to a conversation.
+
+After the change the same script produces "Customer need **will be set to** ... Save it?",
+waits, and only then writes.
+
+### `:latest` makes a container deploy a silent no-op
+
+Rebuilding and running `az containerapp update --image ...:latest` reports `Succeeded` and
+changes nothing, because the image reference string is unchanged — Container Apps has no
+reason to roll a revision. The old code kept serving while every command claimed success,
+which cost a full debugging cycle chasing a fix that was never deployed.
+
+A second, subtler version of the same trap: after a revision *does* roll, traffic stays on
+the previous one until the new revision passes its probes. Testing immediately gives
+confusing results from the old code. Tag every build uniquely and check
+`properties.trafficWeight` before concluding anything about a deploy.
+
 ### Cancelling with nothing in flight is an error
 
 The barge-in rule reads "on speech, cancel the response". Implemented literally it produces
@@ -372,6 +424,12 @@ failure backwards in both directions: a fresh random value on every retry defeat
 entirely, while a reused one silently collapses two genuinely different tasks. Hashing the
 payload makes "same command twice" and "different command" mean exactly what they say.
 Scoping the hash to a conversation is still open, and belongs with the API layer.
+
+**Preview is a precondition, not an instruction.** The agent is told to preview before
+writing, and it does — except when the rep's phrasing sounds like a statement rather than a
+request, which is exactly when a free-text manufacturing note arrives. Instructions set the
+ergonomics; the HMAC token is what makes skipping the read-back impossible. Anything the
+prompt alone enforces is a behaviour, not a guarantee.
 
 **An ambiguous stage cannot reach a write.** `resolve_stage` is a tool the agent is told to
 call, but `update_opportunity` resolves again and refuses anything that is not exactly one

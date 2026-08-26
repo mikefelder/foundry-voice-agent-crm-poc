@@ -119,12 +119,23 @@ class OpportunityPreview(_Schema):
             "stage change is left out of the diff and must be asked aloud."
         ),
     )
+    confirmation_tokens: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Tool name to token. Pass the matching token to that tool to write "
+            "these exact values; any other values are refused."
+        ),
+    )
 
 
 class UpdateOpportunityParams(_Schema):
     """Absolute values only. There is deliberately no way to adjust a value by an amount."""
 
     opportunity_id: RecordId
+    confirmation_token: str = Field(
+        min_length=16,
+        description="From preview_opportunity_update, for exactly these values.",
+    )
     stage: str | None = Field(
         default=None,
         max_length=100,
@@ -136,6 +147,10 @@ class UpdateOpportunityParams(_Schema):
 
 class UpdateOpportunityNotesParams(_Schema):
     opportunity_id: RecordId
+    confirmation_token: str = Field(
+        min_length=16,
+        description="From preview_opportunity_update, for exactly this text.",
+    )
     comments: str | None = Field(default=None, max_length=32000)
     customer_need: str | None = Field(
         default=None,
