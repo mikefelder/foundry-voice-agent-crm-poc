@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "Account",
+    "AccountResolution",
     "Contact",
     "FieldChange",
     "Opportunity",
@@ -40,6 +41,37 @@ class Account(_Model):
     phone: str | None = None
     city: str | None = None
     state: str | None = None
+
+
+class AccountResolution(_Model):
+    """Search hits for a spoken account name.
+
+    Two customers can share a name, or differ only by a suffix nobody says out
+    loud - "United Oil & Gas Corp." against "United Oil & Gas, UK". Picking one
+    silently answers about the wrong company and, worse, carries that account ID
+    into every write that follows.
+    """
+
+    query: str
+    matches: tuple[Account, ...] = ()
+
+    @property
+    def is_unique(self) -> bool:
+        return len(self.matches) == 1
+
+    @property
+    def is_ambiguous(self) -> bool:
+        return len(self.matches) > 1
+
+    @property
+    def is_unresolved(self) -> bool:
+        return not self.matches
+
+    @property
+    def only(self) -> Account:
+        if not self.is_unique:
+            raise ValueError(f"{len(self.matches)} matches for {self.query!r}; expected exactly 1")
+        return self.matches[0]
 
 
 class Contact(_Model):

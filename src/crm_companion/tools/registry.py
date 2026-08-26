@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from crm_companion.crm.models import (
     Account,
+    AccountResolution,
     Contact,
     Opportunity,
     PipelineSummary,
@@ -49,10 +50,11 @@ TOOLS: tuple[ToolSpec, ...] = (
         name="search_accounts",
         description=(
             "Find an account by the name the rep said. Start here; every other "
-            "account tool needs the ID this returns."
+            "account tool needs the ID this returns. More than one match means "
+            "ask which one - two customers can differ only by a suffix nobody says."
         ),
         params=schemas.SearchAccountsParams,
-        result=list[Account],
+        result=AccountResolution,
         handler=handlers.search_accounts,
     ),
     ToolSpec(

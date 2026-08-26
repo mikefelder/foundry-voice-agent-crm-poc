@@ -20,6 +20,9 @@
     "sfUsername": {
       "value": "${SF_USERNAME=}"
     },
+    "sfInstanceUrl": {
+      "value": "${SF_INSTANCE_URL=}"
+    },
     "sfPrivateKeyBase64": {
       "value": "${SF_PRIVATE_KEY_BASE64=}"
     },

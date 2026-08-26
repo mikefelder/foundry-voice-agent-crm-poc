@@ -20,6 +20,9 @@ param sfUsername string = ''
 
 param sfLoginUrl string = 'https://login.salesforce.com'
 
+@description('Org URL used to build record links shown in the browser client.')
+param sfInstanceUrl string = ''
+
 @secure()
 @description('Base64-encoded PEM signing key. Base64 keeps the multi-line PEM to one safe line.')
 param sfPrivateKeyBase64 string = ''
@@ -322,6 +325,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
                   { name: 'SF_CLIENT_ID', value: sfClientId }
                   { name: 'SF_USERNAME', value: sfUsername }
                   { name: 'SF_LOGIN_URL', value: sfLoginUrl }
+                  { name: 'SF_INSTANCE_URL', value: sfInstanceUrl }
                   { name: 'SF_PRIVATE_KEY', secretRef: signingKeySecretName }
                 ]
               : []

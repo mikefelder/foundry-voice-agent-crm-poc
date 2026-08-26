@@ -30,6 +30,7 @@ from azure.identity.aio import DefaultAzureCredential
 from fastapi import WebSocket, WebSocketDisconnect
 
 from crm_companion.agent.voicelive_config import build_session
+from crm_companion.api.links import subscribe
 from crm_companion.config import Settings
 
 __all__ = ["relay"]
@@ -105,6 +106,12 @@ async def _voicelive_to_browser(websocket: WebSocket, connection) -> None:
             await say("error", text=str(getattr(event, "error", "unknown")))
 
 
+async def _links_to_browser(websocket: WebSocket, queue) -> None:
+    while True:
+        link = await queue.get()
+        await websocket.send_text(json.dumps({"type": "link", **link}))
+
+
 async def relay(websocket: WebSocket, settings: Settings) -> None:
     await websocket.accept()
     if not await _authenticate(websocket, settings):
@@ -123,16 +130,18 @@ async def relay(websocket: WebSocket, settings: Settings) -> None:
             await connection.send(ClientEventSessionUpdate(session=build_session(settings)))
             await websocket.send_text(json.dumps({"type": "ready"}))
 
-            pump = asyncio.gather(
-                _browser_to_voicelive(websocket, connection),
-                _voicelive_to_browser(websocket, connection),
-            )
-            try:
-                await pump
-            finally:
-                pump.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+            with subscribe() as links:
+                pump = asyncio.gather(
+                    _browser_to_voicelive(websocket, connection),
+                    _voicelive_to_browser(websocket, connection),
+                    _links_to_browser(websocket, links),
+                )
+                try:
                     await pump
+                finally:
+                    pump.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await pump
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001 - the socket must close cleanly regardless

@@ -15,6 +15,7 @@ from typing import Any
 
 from crm_companion.crm.models import (
     Account,
+    AccountResolution,
     Contact,
     FieldChange,
     Opportunity,
@@ -66,8 +67,10 @@ __all__ = [
 ]
 
 
-async def search_accounts(provider: CrmProvider, params: SearchAccountsParams) -> list[Account]:
-    return await provider.search_accounts(params.query, limit=params.limit)
+async def search_accounts(provider: CrmProvider, params: SearchAccountsParams) -> AccountResolution:
+    """A resolution rather than a list, so more than one hit cannot be read as a pick."""
+    matches = await provider.search_accounts(params.query, limit=params.limit)
+    return AccountResolution(query=params.query, matches=tuple(matches))
 
 
 async def get_account(provider: CrmProvider, params: GetAccountParams) -> Account:

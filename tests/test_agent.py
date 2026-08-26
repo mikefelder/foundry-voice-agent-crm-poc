@@ -30,6 +30,14 @@ class TestInstructions:
     def test_forbids_inventing_ids(self):
         assert "invent" in INSTRUCTIONS
 
+    def test_forbids_speaking_ids_or_links(self):
+        """It read an 18-character ID out letter by letter when asked for a link."""
+        assert "never spell one out" in INSTRUCTIONS
+        assert "link" in INSTRUCTIONS
+
+    def test_requires_asking_which_account(self):
+        assert "search_accounts returns every match" in INSTRUCTIONS
+
     def test_requires_verbatim_notes(self):
         assert "word for word" in INSTRUCTIONS
         assert "paraphrase" in INSTRUCTIONS

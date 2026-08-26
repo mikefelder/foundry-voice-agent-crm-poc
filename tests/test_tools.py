@@ -9,7 +9,7 @@ from crm_companion.crm.fake_provider import (
     FakeCrmProvider,
     RecordedCrmData,
 )
-from crm_companion.crm.models import Contact, TaskRecord, WriteOutcome
+from crm_companion.crm.models import Account, Contact, TaskRecord, WriteOutcome
 from crm_companion.tools import RecordNotFound, ToolError
 from crm_companion.tools.registry import TOOLS, get_tool, read_tools, tool_names, write_tools
 from crm_companion.tools.schemas import GetOpportunityParams, PreviewOpportunityUpdateParams
@@ -175,6 +175,40 @@ class TestPreview:
         tool = get_tool("preview_opportunity_update")
         with pytest.raises(RecordNotFound):
             await tool.handler(provider, tool.params(opportunity_id="006000000000999"))
+
+
+class TestAccountResolution:
+    async def test_a_single_hit_is_unique(self, provider):
+        tool = get_tool("search_accounts")
+        result = await tool.handler(provider, tool.params(query="building"))
+
+        assert result.is_unique
+        assert result.only.id == ACCOUNT_ID
+
+    async def test_several_hits_are_reported_not_picked(self, provider):
+        """Two customers can differ only by a suffix nobody says out loud."""
+        from crm_companion.crm.fake_provider import FakeCrmProvider
+
+        crowded = FakeCrmProvider(
+            accounts=(
+                Account(id="001000000000001", name="United Oil & Gas Corp."),
+                Account(id="001000000000002", name="United Oil & Gas, UK"),
+                Account(id="001000000000003", name="United Oil & Gas, Singapore"),
+            )
+        )
+        tool = get_tool("search_accounts")
+        result = await tool.handler(crowded, tool.params(query="United Oil"))
+
+        assert result.is_ambiguous
+        assert len(result.matches) == 3
+        with pytest.raises(ValueError, match="expected exactly 1"):
+            _ = result.only
+
+    async def test_no_hit_is_unresolved(self, provider):
+        tool = get_tool("search_accounts")
+        result = await tool.handler(provider, tool.params(query="nowhere"))
+
+        assert result.is_unresolved
 
 
 class TestWrites:

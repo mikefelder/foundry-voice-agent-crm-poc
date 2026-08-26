@@ -175,6 +175,18 @@ header {
   font-size: 0.85rem;
 }
 
+.bubble.link {
+  align-self: flex-start;
+  background: var(--agent);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.88rem;
+  font-weight: 550;
+}
+
+.bubble.link:hover { background: #202839; }
+
 /* ---- composer ---------------------------------------------------------- */
 
 .composer {

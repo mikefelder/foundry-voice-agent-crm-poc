@@ -22,6 +22,9 @@ param sfClientId string = ''
 @description('Salesforce integration user. Only used when crmProvider is salesforce.')
 param sfUsername string = ''
 
+@description('Org URL used to build record links shown in the browser client.')
+param sfInstanceUrl string = ''
+
 @secure()
 @description('Base64-encoded PEM signing key for the Connected App JWT flow.')
 param sfPrivateKeyBase64 string = ''
@@ -56,6 +59,7 @@ module resources 'resources.bicep' = {
     crmProvider: crmProvider
     sfClientId: sfClientId
     sfUsername: sfUsername
+    sfInstanceUrl: sfInstanceUrl
     sfPrivateKeyBase64: sfPrivateKeyBase64
     containerImage: containerImage
     projectEndpoint: projectEndpoint

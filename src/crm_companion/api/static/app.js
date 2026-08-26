@@ -53,6 +53,17 @@ function addBubble(role, text) {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
+function addLink(label, url) {
+  const node = document.createElement("a");
+  node.className = "bubble link";
+  node.href = url;
+  node.target = "_blank";
+  node.rel = "noopener noreferrer";
+  node.textContent = `${label} — open record`;
+  transcript.append(node);
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
 // ---- playback -------------------------------------------------------------
 
 function playChunk(buffer) {
@@ -163,6 +174,8 @@ function connect(key) {
       addBubble("system", "Connected. Type a message or press Talk.");
     } else if (event.type === "transcript") {
       addBubble(event.role === "user" ? "user" : "agent", event.text);
+    } else if (event.type === "link") {
+      addLink(event.label, event.url);
     } else if (event.type === "speech_started") {
       stopPlayback();
     } else if (event.type === "error") {

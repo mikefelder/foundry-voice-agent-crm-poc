@@ -159,6 +159,17 @@ class TestChatterMentions:
 
 
 class TestResolution:
+    async def test_one_spoken_name_can_mean_several_customers(self, live_provider):
+        """The stock org ships three United Oil entities; a rep says only "United Oil"."""
+        from crm_companion.tools.registry import get_tool
+
+        tool = get_tool("search_accounts")
+        result = await tool.handler(live_provider, tool.params(query="United Oil"))
+
+        if len(result.matches) < 2:
+            pytest.skip("org has fewer than two United Oil accounts")
+        assert result.is_ambiguous
+
     async def test_spoken_shorthand_resolves_to_real_picklist_value(self, live_provider):
         resolved = await live_provider.resolve_stage("proposal")
         assert resolved.is_unique

@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from crm_companion.api.links import publish
 from crm_companion.api.realtime import relay
 from crm_companion.api.security import api_key_guard
 from crm_companion.config import Settings, get_settings
@@ -60,7 +61,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     guard = api_key_guard(settings)
     for tool in TOOLS:
-        _register(app, tool, guard)
+        _register(app, tool, guard, settings)
 
     _register_error_handlers(app)
 
@@ -74,12 +75,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def _register(app: FastAPI, tool: ToolSpec, guard) -> None:
+# Labels are what the rep sees on screen, so they name the record, not the tool.
+_WRITE_LABELS = {
+    "update_opportunity": "Opportunity updated",
+    "update_opportunity_notes": "Notes updated",
+    "create_task": "Task created",
+    "post_chatter_update": "Posted to Chatter",
+}
+
+
+def _register(app: FastAPI, tool: ToolSpec, guard, settings: Settings) -> None:
     params_model = tool.params
 
     async def endpoint(params: params_model, request: Request):
         provider: CrmProvider = request.app.state.provider
-        return await tool.handler(provider, params)
+        result = await tool.handler(provider, params)
+        if tool.is_write:
+            _announce(tool.name, result, settings)
+        return result
 
     app.post(
         f"/tools/{tool.name}",
@@ -94,8 +107,16 @@ def _register(app: FastAPI, tool: ToolSpec, guard) -> None:
     )(endpoint)
 
 
-class _RevalidatedStatic(StaticFiles):
-    """A cached stylesheet after a deploy looks exactly like a broken page."""
+def _announce(tool_name: str, result, settings: Settings) -> None:
+    """Put a link on screen so the agent never has to read a record ID aloud."""
+    base = (settings.sf_instance_url or "").rstrip("/")
+    record_id = getattr(result, "record_id", None)
+    if not base or not record_id:
+        return
+    publish(_WRITE_LABELS.get(tool_name, "Record updated"), f"{base}/{record_id}")
+
+
+class _RevalidatedStatic(StaticFiles):    """A cached stylesheet after a deploy looks exactly like a broken page."""
 
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)

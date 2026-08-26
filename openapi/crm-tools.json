@@ -17,7 +17,7 @@
           "read"
         ],
         "summary": "search accounts",
-        "description": "Find an account by the name the rep said. Start here; every other account tool needs the ID this returns.",
+        "description": "Find an account by the name the rep said. Start here; every other account tool needs the ID this returns. More than one match means ask which one - two customers can differ only by a suffix nobody says.",
         "operationId": "search_accounts",
         "requestBody": {
           "content": {
@@ -35,11 +35,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/Account"
-                  },
-                  "type": "array",
-                  "title": "Response Search Accounts"
+                  "$ref": "#/components/schemas/AccountResolution"
                 }
               }
             }
@@ -848,6 +844,29 @@
           "name"
         ],
         "title": "Account"
+      },
+      "AccountResolution": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "matches": {
+            "items": {
+              "$ref": "#/components/schemas/Account"
+            },
+            "type": "array",
+            "title": "Matches",
+            "default": []
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "title": "AccountResolution",
+        "description": "Search hits for a spoken account name.\n\nTwo customers can share a name, or differ only by a suffix nobody says out\nloud - \"United Oil & Gas Corp.\" against \"United Oil & Gas, UK\". Picking one\nsilently answers about the wrong company and, worse, carries that account ID\ninto every write that follows."
       },
       "Contact": {
         "properties": {
