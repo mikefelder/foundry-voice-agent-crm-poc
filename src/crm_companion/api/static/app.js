@@ -54,9 +54,17 @@ function addBubble(role, text) {
 }
 
 function addLink(label, url) {
+  let safeUrl;
+  try {
+    const parsed = new URL(url, location.href);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
+    safeUrl = parsed.href;
+  } catch {
+    return;
+  }
   const node = document.createElement("a");
   node.className = "bubble link";
-  node.href = url;
+  node.href = safeUrl;
   node.target = "_blank";
   node.rel = "noopener noreferrer";
   node.textContent = `${label} — open record`;
