@@ -56,7 +56,7 @@ function addBubble(role, text) {
 /** Only http(s) links are rendered; anything else (e.g. javascript:) is dropped. */
 function safeHttpUrl(url) {
   try {
-    const parsed = new URL(url, location.href);
+    const parsed = new URL(url);
     return parsed.protocol === "http:" || parsed.protocol === "https:"
       ? parsed.href
       : null;
