@@ -53,18 +53,24 @@ function addBubble(role, text) {
   transcript.scrollTop = transcript.scrollHeight;
 }
 
-function addLink(label, url) {
-  let safeUrl;
+/** Only http(s) links are rendered; anything else (e.g. javascript:) is dropped. */
+function safeHttpUrl(url) {
   try {
-    const parsed = new URL(url, location.href);
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return;
-    safeUrl = parsed.href;
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.href
+      : null;
   } catch {
-    return;
+    return null;
   }
+}
+
+function addLink(label, url) {
+  const href = safeHttpUrl(url);
+  if (!href) return;
   const node = document.createElement("a");
   node.className = "bubble link";
-  node.href = safeUrl;
+  node.href = href;
   node.target = "_blank";
   node.rel = "noopener noreferrer";
   node.textContent = `${label} — open record`;
